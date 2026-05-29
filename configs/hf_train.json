@@ -5,7 +5,7 @@
   "hf_flavor": "a100-large",
   "timeout": "1h",
   "nproc_per_node": "auto",
-  "num_steps": 5,
+  "num_steps": 100,
   "save_steps": 5,
   "batch_size": 1,
   "max_length": 768,

@@ -155,21 +155,46 @@ tags:
 
 This repository contains the learned DuoAttention attention-head weights and
 custom loading code for `{args.model_name}`. It intentionally does not include
-the full Laguna base-model weights.
+the full Laguna base-model weights or tokenizer files.
+
+Install the optional tokenizer dependencies if they are not already present:
+
+```bash
+pip install sentencepiece tiktoken
+```
+
+Load the tokenizer from the base Laguna model and the patched model from this
+adapter repository:
 
 ```python
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 repo_id = "<this-repo-id>"
 base_model = "{args.model_name}"
-tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
+
+tokenizer = AutoTokenizer.from_pretrained(
+    base_model,
+    trust_remote_code=True,
+    token=True,
+)
 model = AutoModelForCausalLM.from_pretrained(
     repo_id,
     trust_remote_code=True,
+    token=True,
     torch_dtype="auto",
     device_map="auto",
 )
+
+prompt = "The capital of France is"
+inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+with torch.no_grad():
+    generated = model.generate(**inputs, max_new_tokens=32)
+print(tokenizer.decode(generated[0], skip_special_tokens=True))
 ```
+
+Use `token=True` after running `hf auth login`, or pass a token string directly
+when loading private or gated repositories.
 """,
     )
     return package_dir

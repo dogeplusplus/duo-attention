@@ -36,6 +36,11 @@ def parse_args():
     parser.add_argument("--commit-message", default="Upload DuoAttention Laguna adapter")
     parser.add_argument("--skip-upload", action="store_true")
     parser.add_argument("--skip-hub-verify", action="store_true")
+    parser.add_argument(
+        "--update-card-only",
+        action="store_true",
+        help="Update README.md on --repo-id using the current adapter config.",
+    )
     return parser.parse_args()
 
 
@@ -119,6 +124,77 @@ def upload_adapter(path, repo_id, private, commit_message):
     )
 
 
+def render_model_card(config, repo_id):
+    duo_config = config["duo_attention"]
+    base_model = duo_config["base_model_name_or_path"]
+    return f"""---
+library_name: transformers
+base_model: {base_model}
+tags:
+- laguna
+- duo-attention
+- custom-code
+---
+
+# DuoAttention Laguna Adapter
+
+This repository contains learned DuoAttention attention-head weights and custom
+loading code for `{base_model}`. It intentionally does not include the full
+Laguna base-model weights or tokenizer files.
+
+Install optional tokenizer dependencies if needed:
+
+```bash
+pip install sentencepiece tiktoken
+```
+
+Load the tokenizer from the base Laguna model and the patched model from this
+adapter repository:
+
+```python
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+adapter_repo = "{repo_id}"
+base_model = "{base_model}"
+
+tokenizer = AutoTokenizer.from_pretrained(
+    base_model,
+    trust_remote_code=True,
+    token=True,
+)
+
+model = AutoModelForCausalLM.from_pretrained(
+    adapter_repo,
+    trust_remote_code=True,
+    token=True,
+    torch_dtype="auto",
+    device_map="auto",
+)
+
+prompt = "The capital of France is"
+inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+with torch.no_grad():
+    generated = model.generate(**inputs, max_new_tokens=32)
+print(tokenizer.decode(generated[0], skip_special_tokens=True))
+```
+
+Use `token=True` after running `hf auth login`, or pass a token string directly
+when loading private or gated repositories.
+"""
+
+
+def update_model_card(repo_id, config, commit_message):
+    api = HfApi()
+    api.upload_file(
+        repo_id=repo_id,
+        repo_type="model",
+        path_or_fileobj=render_model_card(config, repo_id).encode("utf-8"),
+        path_in_repo="README.md",
+        commit_message=commit_message,
+    )
+
+
 def verify_hub_adapter(repo_id):
     config_path = hf_hub_download(repo_id=repo_id, filename="config.json")
     with open(config_path) as f:
@@ -136,6 +212,14 @@ def verify_hub_adapter(repo_id):
 
 def main():
     args = parse_args()
+    if args.update_card_only:
+        config_path = hf_hub_download(repo_id=args.repo_id, filename="config.json")
+        with open(config_path) as f:
+            config = json.load(f)
+        update_model_card(args.repo_id, config, "Update DuoAttention adapter model card")
+        print(f"Updated model card: https://huggingface.co/{args.repo_id}")
+        return
+
     if args.artifact_dir:
         source = Path(args.artifact_dir)
         run = artifact = None
@@ -157,6 +241,7 @@ def main():
 
     if not args.skip_upload:
         upload_adapter(staged, args.repo_id, args.private, args.commit_message)
+        update_model_card(args.repo_id, validate_adapter(staged)[0], "Update DuoAttention adapter model card")
         print(f"Uploaded adapter to: https://huggingface.co/{args.repo_id}")
 
     if not args.skip_hub_verify:
