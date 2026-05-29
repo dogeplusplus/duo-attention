@@ -244,6 +244,12 @@ def train(
 
 
 def main(args):
+    if args.num_steps < 5:
+        raise ValueError(
+            "--num_steps must be at least 5 because the learning-rate scheduler "
+            "uses num_steps // 5 as a denominator."
+        )
+
     local_rank = int(os.environ["LOCAL_RANK"])
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])

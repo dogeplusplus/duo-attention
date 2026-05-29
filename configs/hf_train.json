@@ -1,0 +1,19 @@
+{
+  "git_repo_url": "https://github.com/dogeplusplus/duo-attention.git",
+  "hf_job_image": "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel",
+  "preinstalled_deps": false,
+  "model_name": "poolside/Laguna-XS.2",
+  "hf_flavor": "a100-large",
+  "timeout": "1h",
+  "nproc_per_node": 1,
+  "num_steps": 5,
+  "save_steps": 5,
+  "batch_size": 1,
+  "max_length": 768,
+  "context_length_min": 768,
+  "context_length_max": 768,
+  "context_lengths_num_intervals": 1,
+  "depth_ratio_num_intervals": 10,
+  "num_passkeys": 1,
+  "output_repo_id": ""
+}
