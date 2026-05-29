@@ -668,7 +668,7 @@ def log_to_wandb(args, records, plots):
             row = []
             for column in columns:
                 value = record.get(column)
-                if value is None and column in numeric_columns:
+                if (value is None or value == "") and column in numeric_columns:
                     value = math.nan
                 elif value is None:
                     value = ""
