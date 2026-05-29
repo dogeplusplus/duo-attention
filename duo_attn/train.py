@@ -60,6 +60,19 @@ def _write_text(path, content):
         f.write(content)
 
 
+def _attention_heads_to_tensor(full_attention_heads, full_attention_heads_list):
+    if full_attention_heads_list is not None:
+        return torch.as_tensor(full_attention_heads_list, dtype=torch.float32).cpu()
+
+    normalized_heads = []
+    for head in full_attention_heads:
+        if isinstance(head, torch.Tensor):
+            normalized_heads.append(head.detach().float().cpu())
+        else:
+            normalized_heads.append(torch.as_tensor(head, dtype=torch.float32).cpu())
+    return torch.stack(normalized_heads)
+
+
 def package_duo_attention_hf_artifacts(
     args,
     config,
@@ -73,8 +86,9 @@ def package_duo_attention_hf_artifacts(
     duo_dir = package_dir / "duo_attention"
     duo_dir.mkdir(parents=True, exist_ok=True)
 
-    heads_tensor = torch.stack(
-        [head.detach().float().cpu() for head in full_attention_heads]
+    heads_tensor = _attention_heads_to_tensor(
+        full_attention_heads,
+        full_attention_heads_list,
     )
     torch.save(heads_tensor, duo_dir / "full_attention_heads.pt")
     save_full_attention_heads(
