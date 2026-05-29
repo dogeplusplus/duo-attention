@@ -10,6 +10,8 @@ from pathlib import Path
 
 KEY_TO_FLAG = {
     "model": "--model",
+    "adapter_repo": "--adapter-repo",
+    "adapter_revision": "--adapter-revision",
     "full_attention_heads": "--full-attention-heads",
     "sink_size": "--sink-size",
     "recent_size": "--recent-size",
@@ -25,8 +27,13 @@ KEY_TO_FLAG = {
     "attn_implementation": "--attn-implementation",
     "output": "--output",
     "json_output": "--json-output",
+    "plot_dir": "--plot-dir",
     "variants": "--variants",
     "seed": "--seed",
+    "wandb_project": "--wandb-project",
+    "wandb_entity": "--wandb-entity",
+    "wandb_run_name": "--wandb-run-name",
+    "wandb_tags": "--wandb-tags",
 }
 
 BOOL_FLAGS = {
@@ -72,11 +79,15 @@ def main():
     with config_path.open("r", encoding="utf-8") as f:
         config = json.load(f)
 
-    if not config.get("model"):
-        raise ValueError(f"{config_path} must set model.")
-    if not config.get("full_attention_heads") and "synthetic_full_ratio" not in config:
+    if not config.get("model") and not config.get("adapter_repo"):
+        raise ValueError(f"{config_path} must set model or adapter_repo.")
+    if (
+        not config.get("adapter_repo")
+        and not config.get("full_attention_heads")
+        and "synthetic_full_ratio" not in config
+    ):
         raise ValueError(
-            f"{config_path} must set full_attention_heads or synthetic_full_ratio."
+            f"{config_path} must set adapter_repo, full_attention_heads, or synthetic_full_ratio."
         )
 
     command = build_command(config)

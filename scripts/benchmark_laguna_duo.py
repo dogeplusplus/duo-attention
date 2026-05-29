@@ -10,6 +10,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
+from huggingface_hub import hf_hub_download
 from transformers import AutoConfig, AutoModelForCausalLM
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +27,21 @@ def parse_args():
             "DuoAttention eval KV-cache splitting."
         )
     )
-    parser.add_argument("--model", required=True, help="HF repo id or local model path.")
+    parser.add_argument(
+        "--model",
+        help="HF repo id or local base model path. Optional when --adapter-repo is set.",
+    )
+    parser.add_argument(
+        "--adapter-repo",
+        help=(
+            "Optional DuoAttention adapter repo/path. When set, the benchmark reads "
+            "duo_attention metadata and full_attention_heads from this repo."
+        ),
+    )
+    parser.add_argument(
+        "--adapter-revision",
+        help="Revision for --adapter-repo when it points to a Hub repo.",
+    )
     parser.add_argument(
         "--full-attention-heads",
         help="Path to DuoAttention full_attention_heads.tsv, .npy, .pt, or .pth.",
@@ -94,6 +110,15 @@ def parse_args():
         default="base,duo",
         help="Comma-separated variants to run: base,duo.",
     )
+    parser.add_argument(
+        "--plot-dir",
+        default="outputs/laguna_duo_benchmark_plots",
+        help="Directory for benchmark plots.",
+    )
+    parser.add_argument("--wandb-project", help="Optional W&B project for logging.")
+    parser.add_argument("--wandb-entity", help="Optional W&B entity.")
+    parser.add_argument("--wandb-run-name", help="Optional W&B run name.")
+    parser.add_argument("--wandb-tags", default="", help="Comma-separated W&B tags.")
     parser.add_argument(
         "--seed",
         type=int,
@@ -201,6 +226,33 @@ def load_full_attention_heads(path):
     raise ValueError(f"Unsupported attention-head file: {path}")
 
 
+def load_adapter_metadata(adapter_repo, revision=None):
+    adapter_path = Path(adapter_repo)
+    if adapter_path.exists():
+        config_path = adapter_path / "config.json"
+    else:
+        config_path = Path(
+            hf_hub_download(
+                repo_id=adapter_repo,
+                filename="config.json",
+                revision=revision,
+            )
+        )
+    with config_path.open() as f:
+        config = json.load(f)
+    duo_config = config.get("duo_attention")
+    if not duo_config:
+        raise ValueError(f"{adapter_repo} does not define config.duo_attention")
+    return config, duo_config
+
+
+def adapter_file_path(adapter_repo, filename, revision=None):
+    adapter_path = Path(adapter_repo)
+    if adapter_path.exists():
+        return str(adapter_path / filename)
+    return hf_hub_download(repo_id=adapter_repo, filename=filename, revision=revision)
+
+
 def synthetic_full_attention_heads(config, full_ratio):
     num_layers = config.num_hidden_layers
     num_kv_heads = config.num_key_value_heads
@@ -212,7 +264,16 @@ def synthetic_full_attention_heads(config, full_ratio):
 
 def prepare_full_attention_heads(args, config):
     if args.full_attention_heads:
-        heads = load_full_attention_heads(args.full_attention_heads)
+        heads_path = args.full_attention_heads
+        heads = load_full_attention_heads(heads_path)
+    elif args.adapter_repo:
+        _, duo_config = load_adapter_metadata(args.adapter_repo, args.adapter_revision)
+        heads_path = adapter_file_path(
+            args.adapter_repo,
+            duo_config["full_attention_heads_file"],
+            args.adapter_revision,
+        )
+        heads = load_full_attention_heads(heads_path)
     else:
         heads = synthetic_full_attention_heads(config, args.synthetic_full_ratio)
 
@@ -379,6 +440,7 @@ def build_result(
     kv_bytes_after_decode = cache_nbytes(decode_outputs.past_key_values)
     tokens_prefilled = args.batch_size * prompt_length
     tokens_decoded = args.batch_size * decode_length
+    total_tokens_in_cache = tokens_prefilled + tokens_decoded
     full_ratio = float(np.mean(full_attention_heads))
     layer_types = list(getattr(config, "layer_types", []) or [])
     full_layer_count = sum(layer_type == "full_attention" for layer_type in layer_types)
@@ -409,9 +471,15 @@ def build_result(
         "decode_tokens_per_sec": tokens_decoded / (decode_stats["mean_ms"] / 1000.0),
         "kv_cache_prefill_mb": kv_bytes_after_prefill / 1024 / 1024,
         "kv_cache_decode_mb": kv_bytes_after_decode / 1024 / 1024,
+        "kv_cache_delta_decode_mb": (
+            kv_bytes_after_decode - kv_bytes_after_prefill
+        )
+        / 1024
+        / 1024,
         "kv_cache_prefill_bytes_per_token": kv_bytes_after_prefill / tokens_prefilled,
         "kv_cache_decode_bytes_per_token": kv_bytes_after_decode
-        / (tokens_prefilled + tokens_decoded),
+        / total_tokens_in_cache,
+        "kv_cache_decode_total_tokens": total_tokens_in_cache,
         "prefill_peak_allocated_mb": (
             prefill_peak_memory / 1024 / 1024 if prefill_peak_memory is not None else ""
         ),
@@ -427,6 +495,36 @@ def build_result(
     }
 
 
+def attach_comparisons(records):
+    by_case = {}
+    for record in records:
+        key = (record["prompt_length"], record["decode_length"])
+        by_case.setdefault(key, {})[record["variant"]] = record
+
+    for variants in by_case.values():
+        base = variants.get("base")
+        duo = variants.get("duo")
+        if not base or not duo:
+            continue
+        for metric in (
+            "kv_cache_prefill_mb",
+            "kv_cache_decode_mb",
+            "kv_cache_decode_bytes_per_token",
+            "prefill_mean_ms",
+            "decode_per_token_mean_ms",
+            "prefill_peak_allocated_mb",
+            "decode_peak_allocated_mb",
+        ):
+            base_value = base.get(metric)
+            duo_value = duo.get(metric)
+            if base_value in ("", 0, None) or duo_value in ("", None):
+                continue
+            ratio = float(duo_value) / float(base_value)
+            reduction = 1.0 - ratio
+            duo[f"{metric}_vs_base_ratio"] = ratio
+            duo[f"{metric}_vs_base_reduction_pct"] = reduction * 100.0
+
+
 def cleanup_model(model, device):
     del model
     gc.collect()
@@ -439,8 +537,13 @@ def write_results(records, output_path, json_output=None):
         return
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = []
+    for record in records:
+        for key in record.keys():
+            if key not in fieldnames:
+                fieldnames.append(key)
     with output_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(records[0].keys()))
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(records)
 
@@ -452,10 +555,137 @@ def write_results(records, output_path, json_output=None):
                 f.write(json.dumps(record) + "\n")
 
 
+def plot_metric(records, metric, ylabel, output_path):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    decode_lengths = sorted({record["decode_length"] for record in records})
+    variants = sorted({record["variant"] for record in records})
+    fig, axes = plt.subplots(
+        1,
+        len(decode_lengths),
+        figsize=(6 * len(decode_lengths), 4),
+        squeeze=False,
+    )
+    for axis, decode_length in zip(axes[0], decode_lengths):
+        for variant in variants:
+            points = sorted(
+                (
+                    record["prompt_length"],
+                    record.get(metric),
+                )
+                for record in records
+                if record["decode_length"] == decode_length
+                and record["variant"] == variant
+                and record.get(metric) not in ("", None)
+            )
+            if not points:
+                continue
+            xs, ys = zip(*points)
+            axis.plot(xs, ys, marker="o", label=variant)
+        axis.set_title(f"decode={decode_length}")
+        axis.set_xlabel("Prompt tokens")
+        axis.set_ylabel(ylabel)
+        axis.grid(True, alpha=0.3)
+        axis.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+    return output_path
+
+
+def write_plots(records, plot_dir):
+    plot_dir = Path(plot_dir)
+    if not records:
+        return []
+    plots = [
+        plot_metric(
+            records,
+            "kv_cache_decode_mb",
+            "KV cache after decode (MB)",
+            plot_dir / "kv_cache_decode_mb.png",
+        ),
+        plot_metric(
+            records,
+            "kv_cache_decode_bytes_per_token",
+            "KV cache bytes/token",
+            plot_dir / "kv_cache_bytes_per_token.png",
+        ),
+        plot_metric(
+            records,
+            "prefill_mean_ms",
+            "Prefill latency (ms)",
+            plot_dir / "prefill_latency_ms.png",
+        ),
+        plot_metric(
+            records,
+            "decode_per_token_mean_ms",
+            "Decode latency/token (ms)",
+            plot_dir / "decode_latency_per_token_ms.png",
+        ),
+    ]
+    if any("kv_cache_decode_mb_vs_base_reduction_pct" in record for record in records):
+        plots.append(
+            plot_metric(
+                records,
+                "kv_cache_decode_mb_vs_base_reduction_pct",
+                "Duo KV cache reduction vs base (%)",
+                plot_dir / "kv_cache_reduction_pct.png",
+            )
+        )
+    return plots
+
+
+def log_to_wandb(args, records, plots):
+    if not args.wandb_project:
+        return
+    import wandb
+
+    tags = [tag.strip() for tag in args.wandb_tags.split(",") if tag.strip()]
+    run = wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        name=args.wandb_run_name,
+        tags=tags,
+        config=vars(args),
+    )
+    if records:
+        columns = []
+        for record in records:
+            for key in record.keys():
+                if key not in columns:
+                    columns.append(key)
+        table = wandb.Table(columns=columns)
+        for record in records:
+            table.add_data(*[record.get(column, "") for column in columns])
+    else:
+        table = wandb.Table(columns=["empty"])
+    wandb.log({"benchmark/results": table})
+    for plot_path in plots:
+        wandb.log({f"benchmark/{plot_path.stem}": wandb.Image(str(plot_path))})
+
+    artifact = wandb.Artifact(f"{run.id}-laguna-duo-benchmark", type="evaluation")
+    if args.output:
+        artifact.add_file(args.output)
+    if args.json_output:
+        artifact.add_file(args.json_output)
+    for plot_path in plots:
+        artifact.add_file(str(plot_path))
+    wandb.log_artifact(artifact)
+    wandb.finish()
+
+
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+
+    if args.adapter_repo:
+        _, duo_config = load_adapter_metadata(args.adapter_repo, args.adapter_revision)
+        if not args.full_attention_heads:
+            args.sink_size = int(duo_config.get("sink_size", args.sink_size))
+            args.recent_size = int(duo_config.get("recent_size", args.recent_size))
+        if not args.model:
+            args.model = duo_config["base_model_name_or_path"]
 
     config = AutoConfig.from_pretrained(
         args.model,
@@ -541,11 +771,19 @@ def main():
             gc.collect()
 
         cleanup_model(model, args.device)
+        attach_comparisons(records)
         write_results(records, args.output, args.json_output)
+
+    attach_comparisons(records)
+    write_results(records, args.output, args.json_output)
+    plots = write_plots(records, args.plot_dir)
+    log_to_wandb(args, records, plots)
 
     print(f"\nWrote {len(records)} records to {args.output}")
     if args.json_output:
         print(f"Wrote JSONL records to {args.json_output}")
+    if plots:
+        print(f"Wrote plots to {args.plot_dir}")
 
 
 if __name__ == "__main__":

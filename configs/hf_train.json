@@ -4,7 +4,7 @@
   "model_name": "poolside/Laguna-XS.2",
   "hf_flavor": "a100-large",
   "timeout": "1h",
-  "nproc_per_node": 1,
+  "nproc_per_node": "auto",
   "num_steps": 5,
   "save_steps": 5,
   "batch_size": 1,

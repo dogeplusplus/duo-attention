@@ -7,6 +7,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
+import torch
 from huggingface_hub import HfApi, hf_hub_download
 
 
@@ -21,6 +22,25 @@ def env_arg(args: list[str], env_name: str, cli_name: str, default=None):
     value = os.environ.get(env_name, default)
     if value is not None and value != "":
         args.extend([cli_name, str(value)])
+
+
+def resolve_nproc_per_node() -> str:
+    value = os.environ.get("NPROC_PER_NODE", "auto").strip().lower()
+    if value and value != "auto":
+        return value
+
+    cuda_count = torch.cuda.device_count()
+    if cuda_count > 0:
+        return str(cuda_count)
+
+    cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    visible_devices = [
+        item for item in cuda_visible_devices.split(",") if item.strip()
+    ]
+    if visible_devices:
+        return str(len(visible_devices))
+
+    return "1"
 
 
 def resolve_dataset_name() -> str:
@@ -109,7 +129,7 @@ def build_train_command() -> list[str]:
     if extra_args:
         train_args.extend(shlex.split(extra_args))
 
-    nproc_per_node = os.environ.get("NPROC_PER_NODE", "1")
+    nproc_per_node = resolve_nproc_per_node()
     return ["torchrun", "--nnodes", "1", "--nproc_per_node", nproc_per_node, *train_args]
 
 

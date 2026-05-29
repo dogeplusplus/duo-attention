@@ -119,6 +119,7 @@ def package_duo_attention_hf_artifacts(
     model_config["architectures"] = ["DuoLagunaForCausalLM"]
     model_config["duo_attention"] = duo_metadata
     auto_map = model_config.get("auto_map") or {}
+    auto_map.pop("AutoConfig", None)
     auto_map["AutoModelForCausalLM"] = "modeling_duo_laguna.DuoLagunaForCausalLM"
     model_config["auto_map"] = auto_map
 

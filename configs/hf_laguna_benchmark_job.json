@@ -1,0 +1,8 @@
+{
+  "git_repo_url": "https://github.com/dogeplusplus/duo-attention.git",
+  "git_ref": "main",
+  "hf_job_image": "kerorogunso/duo-attention-deps:cuda12.4",
+  "hf_flavor": "a100-large",
+  "timeout": "4h",
+  "namespace": ""
+}
