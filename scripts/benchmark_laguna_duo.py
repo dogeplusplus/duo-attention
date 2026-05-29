@@ -526,10 +526,13 @@ def attach_comparisons(records):
 
 
 def cleanup_model(model, device):
+    if model is not None:
+        model.to("cpu")
     del model
     gc.collect()
     if str(device).startswith("cuda"):
         torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
 
 def write_results(records, output_path, json_output=None):
@@ -771,6 +774,7 @@ def main():
             gc.collect()
 
         cleanup_model(model, args.device)
+        del model
         attach_comparisons(records)
         write_results(records, args.output, args.json_output)
 
