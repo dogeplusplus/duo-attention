@@ -32,7 +32,7 @@ uv run python scripts/launch_hf_duo_training_job.py \
   --git-ref "$GIT_REF" \
   --model-name poolside/Laguna-XS.2 \
   --smoke-dataset \
-  --flavor a10g-large \
+  --flavor a100-large \
   --timeout 1h \
   --env NPROC_PER_NODE=1 \
   --env NUM_STEPS=1 \
