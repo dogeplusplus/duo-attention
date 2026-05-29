@@ -23,22 +23,28 @@ def parse_key_value(values: list[str] | None) -> dict[str, str]:
 
 def build_command(args: argparse.Namespace) -> list[str]:
     ref_clause = f" --branch {args.git_ref}" if args.git_ref else ""
-    install_tensor_parallel = " tensor_parallel" if args.install_tensor_parallel else ""
-    flash_attn_install = (
-        "python -m pip install flash-attn --no-build-isolation"
-        if args.install_flash_attn
-        else "true"
-    )
-    command = f"""
-set -euxo pipefail
+    if args.preinstalled_deps:
+        dependency_setup = "true"
+    else:
+        install_tensor_parallel = " tensor_parallel" if args.install_tensor_parallel else ""
+        flash_attn_install = (
+            "python -m pip install flash-attn --no-build-isolation"
+            if args.install_flash_attn
+            else "true"
+        )
+        dependency_setup = f"""
 apt-get update
 apt-get install -y --no-install-recommends git
-git clone --depth 1{ref_clause} {args.git_repo_url} /workspace/duo-attention
-cd /workspace/duo-attention
 python -m pip install --upgrade pip
 python -m pip install \
   accelerate datasets huggingface-hub matplotlib sentencepiece transformers wandb zstandard{install_tensor_parallel}
 {flash_attn_install}
+"""
+    command = f"""
+set -euxo pipefail
+{dependency_setup}
+git clone --depth 1{ref_clause} {args.git_repo_url} /workspace/duo-attention
+cd /workspace/duo-attention
 python -m pip install --ignore-requires-python --no-deps -e .
 python scripts/hf_jobs_duo_train_entrypoint.py
 """
@@ -63,6 +69,7 @@ def main():
     parser.add_argument("--wandb-token-env", default="WANDB_API_KEY", help="Local env var containing a W&B key.")
     parser.add_argument("--install-tensor-parallel", action="store_true")
     parser.add_argument("--install-flash-attn", action="store_true")
+    parser.add_argument("--preinstalled-deps", action="store_true", help="Skip dependency install because the Docker image already contains them.")
     parser.add_argument("--env", action="append", default=[], help="Extra job env as KEY=VALUE.")
     parser.add_argument("--secret", action="append", default=[], help="Extra job secret as KEY=VALUE.")
     args = parser.parse_args()
