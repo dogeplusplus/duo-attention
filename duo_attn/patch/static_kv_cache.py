@@ -3,16 +3,19 @@ import torch
 from transformers.models.llama.modeling_llama import (
     LlamaForCausalLM,
     CausalLMOutputWithPast,
-    Union,
-    CrossEntropyLoss,
     BaseModelOutputWithPast,
 )
 from transformers.models.mistral.modeling_mistral import (
     MistralForCausalLM,
 )
+from transformers.models.laguna.modeling_laguna import (
+    LagunaForCausalLM,
+)
+from transformers.modeling_outputs import MoeCausalLMOutputWithPast, MoeModelOutputWithPast
 
 import types
 from typing import List, Optional, Tuple, Union
+from torch.nn import CrossEntropyLoss
 
 
 class DuoAttentionStaticKVCache:
@@ -50,7 +53,7 @@ class DuoAttentionStaticKVCache:
         self.full_value_states_list = []
 
         for idx, layer_full_attention_heads in enumerate(full_attention_heads):
-            layer_full_attention_heads = torch.tensor(layer_full_attention_heads) > 0.5
+            layer_full_attention_heads = torch.as_tensor(layer_full_attention_heads) > 0.5
             num_full_kv_head = layer_full_attention_heads.sum().item()
             num_streaming_kv_head = self.num_kv_heads - num_full_kv_head
 
@@ -817,4 +820,210 @@ def enable_duo_attention_static_kv_cache_for_mistral(model: MistralForCausalLM):
         )
     model.forward = types.MethodType(
         duo_attn_static_kv_cache_mistral_for_causal_lm_forward, model
+    )
+
+
+def duo_attn_static_kv_cache_laguna_for_causal_lm_forward(
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_values: Optional[DuoAttentionStaticKVCache] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    labels: Optional[torch.LongTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+    logits_to_keep: int | torch.Tensor = 0,
+    **kwargs,
+) -> Union[Tuple, MoeCausalLMOutputWithPast]:
+    output_hidden_states = (
+        output_hidden_states
+        if output_hidden_states is not None
+        else self.config.output_hidden_states
+    )
+    return_dict = (
+        return_dict if return_dict is not None else self.config.use_return_dict
+    )
+
+    outputs = self.model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        past_key_values=past_key_values,
+        inputs_embeds=inputs_embeds,
+        use_cache=use_cache,
+        output_attentions=output_attentions,
+        output_hidden_states=output_hidden_states,
+        return_dict=return_dict,
+    )
+
+    hidden_states = outputs[0]
+    slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+    if self.training:
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+    else:
+        logits = self.lm_head(hidden_states[:, -1:, :])
+
+    loss = None
+    if labels is not None:
+        loss = self.loss_function(logits, labels, self.vocab_size, **kwargs)
+
+    if not return_dict:
+        output = (logits,) + outputs[1:]
+        return (loss,) + output if loss is not None else output
+
+    return MoeCausalLMOutputWithPast(
+        loss=loss,
+        logits=logits,
+        past_key_values=outputs.past_key_values,
+        hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
+        router_logits=None,
+    )
+
+
+def duo_attn_static_kv_cache_laguna_model_forward(
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_values: Optional[DuoAttentionStaticKVCache] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+) -> Union[Tuple, MoeModelOutputWithPast]:
+    output_attentions = (
+        output_attentions
+        if output_attentions is not None
+        else self.config.output_attentions
+    )
+    output_hidden_states = (
+        output_hidden_states
+        if output_hidden_states is not None
+        else self.config.output_hidden_states
+    )
+    return_dict = (
+        return_dict if return_dict is not None else self.config.use_return_dict
+    )
+
+    if input_ids is not None and inputs_embeds is not None:
+        raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
+    elif input_ids is not None:
+        batch_size, seq_length = input_ids.shape
+    elif inputs_embeds is not None:
+        batch_size, seq_length, _ = inputs_embeds.shape
+    else:
+        raise ValueError("You have to specify either input_ids or inputs_embeds")
+
+    past_key_values_length = past_key_values.kv_seq_len if past_key_values is not None else 0
+    if position_ids is None:
+        device = input_ids.device if input_ids is not None else inputs_embeds.device
+        position_ids = torch.arange(
+            past_key_values_length,
+            seq_length + past_key_values_length,
+            dtype=torch.long,
+            device=device,
+        ).unsqueeze(0)
+    else:
+        position_ids = position_ids.view(-1, seq_length).long()
+
+    if inputs_embeds is None:
+        inputs_embeds = self.embed_tokens(input_ids)
+
+    hidden_states = inputs_embeds
+    all_hidden_states = () if output_hidden_states else None
+    all_self_attns = () if output_attentions else None
+
+    position_embeddings = {}
+    for layer_type in set(self.config.layer_types):
+        position_embeddings[layer_type] = self.rotary_emb(hidden_states, position_ids, layer_type)
+
+    for idx, decoder_layer in enumerate(self.layers):
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        layer_outputs = decoder_layer(
+            hidden_states,
+            attention_mask=None,
+            position_ids=position_ids,
+            kv_cache=past_key_values,
+            layer_idx=idx,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+            position_embeddings=position_embeddings[self.config.layer_types[idx]],
+        )
+
+        hidden_states = layer_outputs[0]
+
+        if output_attentions:
+            all_self_attns += (layer_outputs[1],)
+
+    hidden_states = self.norm(hidden_states)
+
+    if output_hidden_states:
+        all_hidden_states += (hidden_states,)
+
+    return MoeModelOutputWithPast(
+        last_hidden_state=hidden_states,
+        past_key_values=past_key_values,
+        hidden_states=all_hidden_states,
+        attentions=all_self_attns,
+        router_logits=None,
+    )
+
+
+def duo_attn_static_kv_cache_laguna_decoder_layer_forward(
+    self,
+    hidden_states: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    kv_cache: Optional[DuoAttentionStaticKVCache] = None,
+    layer_idx: int = None,
+    output_attentions: Optional[bool] = False,
+    use_cache: Optional[bool] = False,
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    residual = hidden_states
+    hidden_states = self.input_layernorm(hidden_states)
+
+    hidden_states, self_attn_weights = self.self_attn(
+        hidden_states=hidden_states,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        position_embeddings=position_embeddings,
+        kv_cache=kv_cache,
+        layer_idx=layer_idx,
+        output_attentions=output_attentions,
+        use_cache=use_cache,
+    )
+    hidden_states = residual + hidden_states
+
+    residual = hidden_states
+    hidden_states = self.post_attention_layernorm(hidden_states)
+    hidden_states = self.mlp(hidden_states)
+    hidden_states = residual + hidden_states
+
+    outputs = (hidden_states,)
+    if output_attentions:
+        outputs += (self_attn_weights,)
+    return outputs
+
+
+def enable_duo_attention_static_kv_cache_for_laguna(model: LagunaForCausalLM):
+    model.model.forward = types.MethodType(
+        duo_attn_static_kv_cache_laguna_model_forward, model.model
+    )
+    for idx in range(len(model.model.layers)):
+        layer = model.model.layers[idx]
+        layer.forward = types.MethodType(
+            duo_attn_static_kv_cache_laguna_decoder_layer_forward,
+            layer,
+        )
+        layer.self_attn.num_key_value_heads = model.config.num_key_value_heads
+    model.forward = types.MethodType(
+        duo_attn_static_kv_cache_laguna_for_causal_lm_forward, model
     )

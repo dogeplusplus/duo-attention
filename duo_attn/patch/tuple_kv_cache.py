@@ -6,19 +6,41 @@ import torch.functional as F
 from transformers.models.llama.modeling_llama import (
     LlamaForCausalLM,
     CausalLMOutputWithPast,
-    List,
-    Union,
-    CrossEntropyLoss,
     BaseModelOutputWithPast,
     apply_rotary_pos_emb,
 )
 from transformers.models.mistral.modeling_mistral import (
     MistralForCausalLM,
 )
+from transformers.models.laguna.modeling_laguna import (
+    LagunaForCausalLM,
+    apply_rotary_pos_emb as apply_laguna_rotary_pos_emb,
+)
+from transformers.modeling_outputs import MoeCausalLMOutputWithPast, MoeModelOutputWithPast
 import types
 
-from flash_attn import flash_attn_func, flash_attn_varlen_func
-from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
+try:
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
+except ImportError:
+    from .flash_attn_fallback import flash_attn_func, flash_attn_varlen_func
+
+    def index_first_axis(input_tensor, indices):
+        return input_tensor[indices]
+
+    def pad_input(input_tensor, indices, batch_size, query_length):
+        raise NotImplementedError(
+            "pad_input requires flash-attn; the PyTorch fallback only supports "
+            "unpadded smoke tests."
+        )
+
+    def unpad_input(input_tensor, padding_mask):
+        raise NotImplementedError(
+            "unpad_input requires flash-attn; the PyTorch fallback only supports "
+            "unpadded smoke tests."
+        )
+from torch.nn import CrossEntropyLoss
+import torch.nn.functional as nnF
 
 
 def _get_unpad_data(padding_mask):
@@ -783,10 +805,299 @@ def enable_tuple_kv_cache_for_mistral(model: MistralForCausalLM):
     model.forward = types.MethodType(old_mistral_for_causal_lm_forward, model)
 
 
+def old_laguna_for_causal_lm_forward(
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_values: Optional[List[torch.FloatTensor]] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    labels: Optional[torch.LongTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+    output_router_logits: Optional[bool] = None,
+    logits_to_keep: int | torch.Tensor = 0,
+    **kwargs,
+) -> Union[Tuple, MoeCausalLMOutputWithPast]:
+    output_hidden_states = (
+        output_hidden_states
+        if output_hidden_states is not None
+        else self.config.output_hidden_states
+    )
+    return_dict = (
+        return_dict if return_dict is not None else self.config.use_return_dict
+    )
+
+    outputs = self.model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        past_key_values=past_key_values,
+        inputs_embeds=inputs_embeds,
+        use_cache=use_cache,
+        output_attentions=output_attentions,
+        output_hidden_states=output_hidden_states,
+        return_dict=return_dict,
+        **kwargs,
+    )
+
+    hidden_states = outputs[0]
+    slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+    if self.training:
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+    else:
+        logits = self.lm_head(hidden_states[:, -1:, :])
+
+    loss = None
+    if labels is not None:
+        loss = self.loss_function(logits, labels, self.vocab_size, **kwargs)
+
+    if not return_dict:
+        output = (logits,) + outputs[1:]
+        return (loss,) + output if loss is not None else output
+
+    return MoeCausalLMOutputWithPast(
+        loss=loss,
+        logits=logits,
+        past_key_values=outputs.past_key_values,
+        hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
+        router_logits=None,
+    )
+
+
+def old_laguna_model_forward(
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_values: Optional[List[torch.FloatTensor]] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+    **kwargs,
+) -> Union[Tuple, MoeModelOutputWithPast]:
+    output_attentions = (
+        output_attentions
+        if output_attentions is not None
+        else self.config.output_attentions
+    )
+    output_hidden_states = (
+        output_hidden_states
+        if output_hidden_states is not None
+        else self.config.output_hidden_states
+    )
+    use_cache = use_cache if use_cache is not None else self.config.use_cache
+    return_dict = (
+        return_dict if return_dict is not None else self.config.use_return_dict
+    )
+
+    if input_ids is not None and inputs_embeds is not None:
+        raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
+    elif input_ids is not None:
+        batch_size, seq_length = input_ids.shape
+    elif inputs_embeds is not None:
+        batch_size, seq_length, _ = inputs_embeds.shape
+    else:
+        raise ValueError("You have to specify either input_ids or inputs_embeds")
+
+    past_key_values_length = 0
+    if past_key_values is not None:
+        past_key_values_length = past_key_values[0][0].shape[2]
+
+    if position_ids is None:
+        device = input_ids.device if input_ids is not None else inputs_embeds.device
+        position_ids = torch.arange(
+            past_key_values_length,
+            seq_length + past_key_values_length,
+            dtype=torch.long,
+            device=device,
+        ).unsqueeze(0)
+    else:
+        position_ids = position_ids.view(-1, seq_length).long()
+
+    if inputs_embeds is None:
+        inputs_embeds = self.embed_tokens(input_ids)
+
+    hidden_states = inputs_embeds
+    all_hidden_states = () if output_hidden_states else None
+    all_self_attns = () if output_attentions else None
+    next_decoder_cache = () if use_cache else None
+
+    position_embeddings = {}
+    for layer_type in set(self.config.layer_types):
+        position_embeddings[layer_type] = self.rotary_emb(hidden_states, position_ids, layer_type)
+
+    for idx, decoder_layer in enumerate(self.layers):
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        past_key_value = past_key_values[idx] if past_key_values is not None else None
+        layer_outputs = decoder_layer(
+            hidden_states,
+            attention_mask=None,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+            position_embeddings=position_embeddings[self.config.layer_types[idx]],
+        )
+
+        hidden_states = layer_outputs[0]
+
+        if use_cache:
+            next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
+
+        if output_attentions:
+            all_self_attns += (layer_outputs[1],)
+
+    hidden_states = self.norm(hidden_states)
+
+    if output_hidden_states:
+        all_hidden_states += (hidden_states,)
+
+    next_cache = next_decoder_cache if use_cache else None
+    if not return_dict:
+        return tuple(
+            v
+            for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
+            if v is not None
+        )
+    return MoeModelOutputWithPast(
+        last_hidden_state=hidden_states,
+        past_key_values=next_cache,
+        hidden_states=all_hidden_states,
+        attentions=all_self_attns,
+        router_logits=None,
+    )
+
+
+def old_laguna_decoder_layer_forward(
+    self,
+    hidden_states: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_value: Optional[Tuple[torch.Tensor]] = None,
+    output_attentions: Optional[bool] = False,
+    use_cache: Optional[bool] = False,
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    **kwargs,
+) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    residual = hidden_states
+    hidden_states = self.input_layernorm(hidden_states)
+
+    hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states=hidden_states,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        position_embeddings=position_embeddings,
+        past_key_value=past_key_value,
+        output_attentions=output_attentions,
+        use_cache=use_cache,
+    )
+    hidden_states = residual + hidden_states
+
+    residual = hidden_states
+    hidden_states = self.post_attention_layernorm(hidden_states)
+    hidden_states = self.mlp(hidden_states)
+    hidden_states = residual + hidden_states
+
+    outputs = (hidden_states,)
+    if output_attentions:
+        outputs += (self_attn_weights,)
+    if use_cache:
+        outputs += (present_key_value,)
+    return outputs
+
+
+def old_laguna_attention_forward(
+    self,
+    hidden_states: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    past_key_value: Optional[Tuple[torch.Tensor]] = None,
+    output_attentions: bool = False,
+    use_cache: bool = False,
+    **kwargs,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    bsz, q_len, _ = hidden_states.size()
+    num_key_value_heads = getattr(
+        self, "num_key_value_heads", self.config.num_key_value_heads
+    )
+
+    query_states = self.q_proj(hidden_states).view(
+        bsz, q_len, self.num_heads, self.head_dim
+    )
+    key_states = self.k_proj(hidden_states).view(
+        bsz, q_len, num_key_value_heads, self.head_dim
+    )
+    value_states = self.v_proj(hidden_states).view(
+        bsz, q_len, num_key_value_heads, self.head_dim
+    )
+
+    query_states = self.q_norm(query_states)
+    key_states = self.k_norm(key_states)
+
+    if position_embeddings is None:
+        raise ValueError("Laguna tuple KV cache requires position_embeddings")
+    cos, sin = position_embeddings
+    query_states, key_states = apply_laguna_rotary_pos_emb(
+        query_states, key_states, cos, sin, unsqueeze_dim=2
+    )
+
+    if past_key_value is not None:
+        key_states = torch.cat([past_key_value[0].transpose(1, 2), key_states], dim=1)
+        value_states = torch.cat(
+            [past_key_value[1].transpose(1, 2), value_states], dim=1
+        )
+
+    present_key_value = (
+        (key_states.transpose(1, 2), value_states.transpose(1, 2))
+        if use_cache
+        else None
+    )
+
+    attn_output = flash_attn_func(
+        query_states,
+        key_states,
+        value_states,
+        causal=True,
+        dropout_p=0.0 if not self.training else self.attention_dropout,
+    )
+    gate = nnF.softplus(self.g_proj(hidden_states).float()).to(attn_output.dtype)
+    attn_output = attn_output.reshape(bsz, q_len, self.num_heads, self.head_dim)
+    attn_output = (attn_output * gate.unsqueeze(-1)).reshape(
+        bsz, q_len, self.num_heads * self.head_dim
+    )
+    attn_output = self.o_proj(attn_output)
+
+    return attn_output, None, present_key_value
+
+
+def enable_tuple_kv_cache_for_laguna(model: LagunaForCausalLM):
+    print("Enabling tuple KV cache for Laguna")
+    model.model.forward = types.MethodType(old_laguna_model_forward, model.model)
+    for idx in range(len(model.model.layers)):
+        layer = model.model.layers[idx]
+        layer.forward = types.MethodType(old_laguna_decoder_layer_forward, layer)
+        layer.self_attn.num_key_value_heads = model.config.num_key_value_heads
+        layer.self_attn.forward = types.MethodType(
+            old_laguna_attention_forward, layer.self_attn
+        )
+    model.forward = types.MethodType(old_laguna_for_causal_lm_forward, model)
+
+
 def enable_tuple_kv_cache(model):
     if isinstance(model, LlamaForCausalLM):
         enable_tuple_kv_cache_for_llama(model)
     elif isinstance(model, MistralForCausalLM):
         enable_tuple_kv_cache_for_mistral(model)
+    elif isinstance(model, LagunaForCausalLM):
+        enable_tuple_kv_cache_for_laguna(model)
     else:
         raise ValueError("Model not supported")

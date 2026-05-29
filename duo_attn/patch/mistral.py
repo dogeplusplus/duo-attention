@@ -1,7 +1,8 @@
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple, Union
 import os
 import torch
 from torch import nn
+from torch.nn import CrossEntropyLoss
 
 from transformers.models.mistral.modeling_mistral import (
     MistralForCausalLM,
@@ -9,9 +10,6 @@ from transformers.models.mistral.modeling_mistral import (
     repeat_kv,
     apply_rotary_pos_emb,
     CausalLMOutputWithPast,
-    List,
-    Union,
-    CrossEntropyLoss,
     BaseModelOutputWithPast,
 )
 import types
@@ -33,8 +31,15 @@ from .static_kv_cache import (
 from .tuple_kv_cache import enable_tuple_kv_cache_for_mistral
 from .flashinfer_utils import apply_rope_inplace, enable_flashinfer_rmsnorm
 
-from tensor_parallel.pretrained_model import TensorParallelPreTrainedModel
-from flash_attn import flash_attn_func, flash_attn_with_kvcache
+try:
+    from tensor_parallel.pretrained_model import TensorParallelPreTrainedModel
+except ImportError:
+    class TensorParallelPreTrainedModel:
+        pass
+try:
+    from flash_attn import flash_attn_func, flash_attn_with_kvcache
+except ImportError:
+    from .flash_attn_fallback import flash_attn_func, flash_attn_with_kvcache
 from duo_attn.ulysses import UlyssesAttention
 
 

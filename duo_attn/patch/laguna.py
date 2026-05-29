@@ -1,16 +1,13 @@
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Tuple
 import os
 import torch
+import torch.nn.functional as F
 from torch import nn
-from torch.nn import CrossEntropyLoss
 
-from transformers.models.llama.modeling_llama import (
-    LlamaForCausalLM,
-    LlamaModel,
-    repeat_kv,
+from transformers.models.laguna.modeling_laguna import (
+    LagunaForCausalLM,
+    LagunaModel,
     apply_rotary_pos_emb,
-    CausalLMOutputWithPast,
-    BaseModelOutputWithPast,
 )
 import types
 from .utils import (
@@ -26,10 +23,9 @@ from .streaming_attn import (
 
 from .static_kv_cache import (
     DuoAttentionStaticKVCache,
-    enable_duo_attention_static_kv_cache_for_llama,
+    enable_duo_attention_static_kv_cache_for_laguna,
 )
-from .tuple_kv_cache import enable_tuple_kv_cache_for_llama
-from .flashinfer_utils import apply_rope_inplace, enable_flashinfer_rmsnorm
+from .tuple_kv_cache import enable_tuple_kv_cache_for_laguna
 
 try:
     from tensor_parallel.pretrained_model import TensorParallelPreTrainedModel
@@ -37,17 +33,53 @@ except ImportError:
     class TensorParallelPreTrainedModel:
         pass
 try:
-    from flash_attn import flash_attn_func, flash_attn_with_kvcache
+    from flash_attn import flash_attn_func
 except ImportError:
-    from .flash_attn_fallback import flash_attn_func, flash_attn_with_kvcache
+    from .flash_attn_fallback import flash_attn_func
 from duo_attn.ulysses import UlyssesAttention
 
 
-def llama_duo_attention_forward_two_way(
+def _laguna_num_key_value_heads(module):
+    return getattr(module, "num_key_value_heads", module.config.num_key_value_heads)
+
+
+def _laguna_attn_inner_dim(module):
+    return module.num_heads * module.head_dim
+
+
+def _laguna_shape_qkv(module, hidden_states):
+    bsz, q_len, _ = hidden_states.size()
+    num_key_value_heads = _laguna_num_key_value_heads(module)
+
+    query_states = module.q_proj(hidden_states).view(
+        bsz, q_len, module.num_heads, module.head_dim
+    )
+    key_states = module.k_proj(hidden_states).view(
+        bsz, q_len, num_key_value_heads, module.head_dim
+    )
+    value_states = module.v_proj(hidden_states).view(
+        bsz, q_len, num_key_value_heads, module.head_dim
+    )
+
+    query_states = module.q_norm(query_states)
+    key_states = module.k_norm(key_states)
+    return query_states, key_states, value_states
+
+
+def _laguna_apply_gate(module, attn_output, hidden_states):
+    input_shape = hidden_states.shape[:-1]
+    gate = F.softplus(module.g_proj(hidden_states).float()).to(attn_output.dtype)
+    attn_output = attn_output.reshape(*input_shape, module.num_heads, module.head_dim)
+    attn_output = attn_output * gate.unsqueeze(-1)
+    return attn_output.reshape(*input_shape, _laguna_attn_inner_dim(module))
+
+
+def laguna_duo_attention_forward_two_way(
     self,
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     past_key_value: Optional[Tuple[torch.Tensor]] = None,
     output_attentions: bool = False,
     use_cache: bool = False,
@@ -63,33 +95,17 @@ def llama_duo_attention_forward_two_way(
     streaming_hidden_states = hidden_states[bsz:]
 
     with torch.no_grad():
-        full_query_states = self.q_proj(full_hidden_states)
-        full_key_states = self.k_proj(full_hidden_states)
-        full_value_states = self.v_proj(full_hidden_states)
-        full_query_states = full_query_states.view(
-            bsz, q_len, self.num_heads, self.head_dim
-        )
-        full_key_states = full_key_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        )
-        full_value_states = full_value_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
+        full_query_states, full_key_states, full_value_states = _laguna_shape_qkv(
+            self, full_hidden_states
         )
 
-    streaming_query_states = self.q_proj(streaming_hidden_states)
-    streaming_key_states = self.k_proj(streaming_hidden_states)
-    streaming_value_states = self.v_proj(streaming_hidden_states)
-    streaming_query_states = streaming_query_states.view(
-        bsz, q_len, self.num_heads, self.head_dim
-    )
-    streaming_key_states = streaming_key_states.view(
-        bsz, q_len, self.num_key_value_heads, self.head_dim
-    )
-    streaming_value_states = streaming_value_states.view(
-        bsz, q_len, self.num_key_value_heads, self.head_dim
+    streaming_query_states, streaming_key_states, streaming_value_states = (
+        _laguna_shape_qkv(self, streaming_hidden_states)
     )
 
-    cos, sin = self.rotary_emb(full_value_states, position_ids)
+    if position_embeddings is None:
+        raise ValueError("Laguna DuoAttention requires position_embeddings")
+    cos, sin = position_embeddings
 
     with torch.no_grad():
         full_query_states, full_key_states = apply_rotary_pos_emb(
@@ -124,8 +140,8 @@ def llama_duo_attention_forward_two_way(
 
     full_attention_heads = (
         self.full_attention_heads.clamp(0, 1)
-        .view(1, 1, self.num_key_value_heads, 1, 1)
-        .expand(1, 1, self.num_key_value_heads, self.num_key_value_groups, 1)
+        .view(1, 1, _laguna_num_key_value_heads(self), 1, 1)
+        .expand(1, 1, _laguna_num_key_value_heads(self), self.num_key_value_groups, 1)
         .reshape(1, 1, self.num_heads, 1)
     )
 
@@ -134,25 +150,27 @@ def llama_duo_attention_forward_two_way(
     ) * streaming_attn_output + full_attention_heads * full_attn_output
 
     with torch.no_grad():
-        full_attn_output = full_attn_output.reshape(bsz, q_len, self.hidden_size)
+        full_attn_output = _laguna_apply_gate(self, full_attn_output, full_hidden_states)
         full_attn_output = self.o_proj(full_attn_output)
 
-    streaming_attn_output = streaming_attn_output.reshape(bsz, q_len, self.hidden_size)
+    streaming_attn_output = _laguna_apply_gate(
+        self, streaming_attn_output, streaming_hidden_states
+    )
     streaming_attn_output = self.o_proj(streaming_attn_output)
 
     attn_output = torch.cat([full_attn_output, streaming_attn_output], dim=0)
 
-    if not output_attentions:
-        attn_weights = None
+    attn_weights = None
 
     return attn_output, attn_weights, past_key_value
 
 
-def llama_duo_attention_forward_one_way_reordered(
+def laguna_duo_attention_forward_one_way_reordered(
     self,
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     past_key_value: Optional[Tuple[torch.Tensor]] = None,
     output_attentions: bool = False,
     use_cache: bool = False,
@@ -160,15 +178,7 @@ def llama_duo_attention_forward_one_way_reordered(
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     bsz, q_len, _ = hidden_states.size()
 
-    query_states = self.q_proj(hidden_states)
-    key_states = self.k_proj(hidden_states)
-    value_states = self.v_proj(hidden_states)
-
-    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim)
-    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim)
-    value_states = value_states.view(
-        bsz, q_len, self.num_key_value_heads, self.head_dim
-    )
+    query_states, key_states, value_states = _laguna_shape_qkv(self, hidden_states)
 
     # new data structure for past_key_value
     # past_key_value = (full_KV, streaming_KV)
@@ -179,7 +189,9 @@ def llama_duo_attention_forward_one_way_reordered(
     if past_key_value is not None:
         kv_seq_len += past_key_value[0].shape[2]
 
-    cos, sin = self.rotary_emb(value_states, position_ids)
+    if position_embeddings is None:
+        raise ValueError("Laguna DuoAttention requires position_embeddings")
+    cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(
         query_states,
         key_states,
@@ -192,7 +204,7 @@ def llama_duo_attention_forward_one_way_reordered(
         self.full_attn_head_mask = self.full_attention_heads > 0.5
         self.num_full_attn_head = self.full_attn_head_mask.sum().item()
         self.num_streaming_attn_head = (
-            self.num_key_value_heads - self.num_full_attn_head
+            _laguna_num_key_value_heads(self) - self.num_full_attn_head
         )
 
         self.num_full_query_head = self.num_full_attn_head * self.num_key_value_groups
@@ -271,8 +283,7 @@ def llama_duo_attention_forward_one_way_reordered(
         else:
             attn_output = torch.cat([full_attn_output, streaming_attn_output], dim=2)
 
-    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-
+    attn_output = _laguna_apply_gate(self, attn_output, hidden_states)
     attn_output = self.o_proj(attn_output)
 
     if streaming_key_states.shape[1] > self.recent_size + self.sink_size:
@@ -305,17 +316,17 @@ def llama_duo_attention_forward_one_way_reordered(
         else None
     )
 
-    if not output_attentions:
-        attn_weights = None
+    attn_weights = None
 
     return attn_output, attn_weights, past_key_value
 
 
-def llama_duo_attention_forward_one_way_reordered_static(
+def laguna_duo_attention_forward_one_way_reordered_static(
     self,
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     kv_cache: Optional[DuoAttentionStaticKVCache] = None,
     layer_idx: int = None,
     output_attentions: bool = False,
@@ -324,36 +335,21 @@ def llama_duo_attention_forward_one_way_reordered_static(
 ):
     bsz, q_len, _ = hidden_states.size()
 
-    query_states = self.q_proj(hidden_states)
-    key_states = self.k_proj(hidden_states)
-    value_states = self.v_proj(hidden_states)
-
-    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim)
-    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim)
-    value_states = value_states.view(
-        bsz, q_len, self.num_key_value_heads, self.head_dim
-    )
+    query_states, key_states, value_states = _laguna_shape_qkv(self, hidden_states)
 
     kv_seq_len = q_len
     if kv_cache is not None:
         kv_seq_len += kv_cache.kv_seq_len
 
-    # Replace the Huggingface's apply rotory pos emb with FlashInfer's rope
-
-    # cos, sin = self.rotary_emb(value_states, position_ids)
-    # query_states, key_states = apply_rotary_pos_emb(
-    #     query_states,
-    #     key_states,
-    #     cos,
-    #     sin,
-    #     unsqueeze_dim=2,  # unsqueeze_dim=2 for the flash attention
-    # )
-
-    rope_scale = 1.0
-    if self.config.rope_scaling is not None:
-        rope_scale = self.config.rope_scaling.get("factor", 1.0)
-    apply_rope_inplace(
-        query_states, key_states, position_ids[:, 0], rope_scale, self.rope_theta
+    if position_embeddings is None:
+        raise ValueError("Laguna DuoAttention requires position_embeddings")
+    cos, sin = position_embeddings
+    query_states, key_states = apply_rotary_pos_emb(
+        query_states,
+        key_states,
+        cos,
+        sin,
+        unsqueeze_dim=2,
     )
 
     (
@@ -429,18 +425,16 @@ def llama_duo_attention_forward_one_way_reordered_static(
         layer_idx, streaming_key_states, streaming_value_states
     )
 
-    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-
+    attn_output = _laguna_apply_gate(self, attn_output, hidden_states)
     attn_output = self.o_proj(attn_output)
 
-    if not output_attentions:
-        attn_weights = None
+    attn_weights = None
 
     return attn_output, attn_weights
 
 
-def enable_llama_duo_attention_training(
-    model: LlamaForCausalLM,
+def enable_laguna_duo_attention_training(
+    model: LagunaForCausalLM,
     sink_size,
     recent_size,
     max_length,
@@ -448,22 +442,13 @@ def enable_llama_duo_attention_training(
     enable_ulysses_attention=False,
     streaming_attn_implementation="blocksparse",
 ):
-    enable_tuple_kv_cache_for_llama(model)
+    enable_tuple_kv_cache_for_laguna(model)
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
 
     if streaming_attn_implementation == "blocksparse":
         num_sink_blocks = (sink_size + 127) // 128
         num_recent_blocks = (recent_size + 127) // 128
-        num_heads_per_device = model.config.num_attention_heads // int(
-            os.environ["WORLD_SIZE"]
-        )
-        print(
-            f"Using blocksparse implementation with {num_sink_blocks} sink blocks, {num_recent_blocks} recent blocks, and {num_heads_per_device} heads per device"
-        )
-        streaming_mask = generate_streaming_info_blocksparse_flash_attn(
-            num_sink_blocks, num_recent_blocks, num_heads_per_device, device
-        )
         streaming_attn_func = streaming_attn_blocksparse_flash_attn
     elif streaming_attn_implementation == "sdpa":
         streaming_mask = generate_streaming_mask(
@@ -477,14 +462,23 @@ def enable_llama_duo_attention_training(
 
     for layer in model.model.layers:
         module = layer.self_attn
-        module.forward = types.MethodType(llama_duo_attention_forward_two_way, module)
+        module.num_key_value_heads = _laguna_num_key_value_heads(module)
+        if streaming_attn_implementation == "blocksparse":
+            num_heads_per_device = module.num_heads // int(os.environ["WORLD_SIZE"])
+            print(
+                f"Using blocksparse implementation with {num_sink_blocks} sink blocks, {num_recent_blocks} recent blocks, and {num_heads_per_device} heads per device"
+            )
+            streaming_mask = generate_streaming_info_blocksparse_flash_attn(
+                num_sink_blocks, num_recent_blocks, num_heads_per_device, device
+            )
+        module.forward = types.MethodType(laguna_duo_attention_forward_two_way, module)
         module.sink_size = sink_size
         module.recent_size = recent_size
         module.register_parameter(
             "full_attention_heads",
             nn.Parameter(
                 torch.ones(
-                    module.num_key_value_heads,
+                    _laguna_num_key_value_heads(module),
                     device=device,
                     dtype=dtype,
                     requires_grad=True,
@@ -506,24 +500,25 @@ def enable_llama_duo_attention_training(
             )
 
 
-def enable_llama_duo_attention_eval(
-    model: LlamaForCausalLM,
+def enable_laguna_duo_attention_eval(
+    model: LagunaForCausalLM,
     full_attention_heads,
     sink_size,
     recent_size,
 ):
-    enable_tuple_kv_cache_for_llama(model)
+    enable_tuple_kv_cache_for_laguna(model)
 
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
     for idx, layer in enumerate(model.model.layers):
         module = layer.self_attn
-        layer_full_attention_heads = torch.tensor(
+        module.num_key_value_heads = _laguna_num_key_value_heads(module)
+        layer_full_attention_heads = torch.as_tensor(
             full_attention_heads[idx], device=device, dtype=dtype
         )
 
         module.forward = types.MethodType(
-            llama_duo_attention_forward_one_way_reordered, module
+            laguna_duo_attention_forward_one_way_reordered, module
         )
         module.q_proj = reorder_linear_weights(
             module.q_proj,
@@ -541,6 +536,12 @@ def enable_llama_duo_attention_eval(
             module.v_proj,
             layer_full_attention_heads,
             module.head_dim,
+            "out",
+        )
+        module.g_proj = reorder_linear_weights(
+            module.g_proj,
+            layer_full_attention_heads,
+            module.num_key_value_groups,
             "out",
         )
         module.o_proj = reorder_linear_weights(
@@ -559,23 +560,23 @@ def enable_llama_duo_attention_eval(
         )
 
 
-def enable_llama_duo_attention_static_kv_cache_eval(
-    model: LlamaForCausalLM,
+def enable_laguna_duo_attention_static_kv_cache_eval(
+    model: LagunaForCausalLM,
     full_attention_heads,
 ):
-    enable_duo_attention_static_kv_cache_for_llama(model)
-    enable_flashinfer_rmsnorm(model)
+    enable_duo_attention_static_kv_cache_for_laguna(model)
 
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
     for idx, layer in enumerate(model.model.layers):
         module = layer.self_attn
-        layer_full_attention_heads = torch.tensor(
+        module.num_key_value_heads = _laguna_num_key_value_heads(module)
+        layer_full_attention_heads = torch.as_tensor(
             full_attention_heads[idx], device=device, dtype=dtype
         )
 
         module.forward = types.MethodType(
-            llama_duo_attention_forward_one_way_reordered_static, module
+            laguna_duo_attention_forward_one_way_reordered_static, module
         )
         module.q_proj = reorder_linear_weights(
             module.q_proj,
@@ -595,6 +596,12 @@ def enable_llama_duo_attention_static_kv_cache_eval(
             module.head_dim,
             "out",
         )
+        module.g_proj = reorder_linear_weights(
+            module.g_proj,
+            layer_full_attention_heads,
+            module.num_key_value_groups,
+            "out",
+        )
         module.o_proj = reorder_linear_weights(
             module.o_proj,
             layer_full_attention_heads,
@@ -603,7 +610,7 @@ def enable_llama_duo_attention_static_kv_cache_eval(
         )
 
 
-def get_llama_full_attention_heads(model):
+def get_laguna_full_attention_heads(model):
     full_attention_heads = []
     if isinstance(model, TensorParallelPreTrainedModel):
         for shard in model.wrapped_model.module_shards:
@@ -625,13 +632,13 @@ def get_llama_full_attention_heads(model):
             )
             for layer_idx in range(len(full_attention_heads[0]))
         ]
-    elif isinstance(model, LlamaForCausalLM):
+    elif isinstance(model, LagunaForCausalLM):
         for layer in model.model.layers:
             module = layer.self_attn
             if not hasattr(module, "full_attention_heads"):
                 continue
             full_attention_heads.append(module.full_attention_heads)
-    elif isinstance(model, LlamaModel):
+    elif isinstance(model, LagunaModel):
         for layer in model.layers:
             module = layer.self_attn
             if not hasattr(module, "full_attention_heads"):
@@ -643,7 +650,7 @@ def get_llama_full_attention_heads(model):
     return full_attention_heads
 
 
-def set_llama_full_attention_heads(model, full_attention_heads):
+def set_laguna_full_attention_heads(model, full_attention_heads):
     if isinstance(model, TensorParallelPreTrainedModel):
         for shard in model.wrapped_model.module_shards:
             for layer_idx, layer in enumerate(shard.model.layers):
@@ -654,7 +661,7 @@ def set_llama_full_attention_heads(model, full_attention_heads):
                     module.full_attention_heads.device,
                     module.full_attention_heads.dtype,
                 )
-    elif isinstance(model, LlamaForCausalLM):
+    elif isinstance(model, LagunaForCausalLM):
         for layer_idx, layer in enumerate(model.model.layers):
             module = layer.self_attn
             if not hasattr(module, "full_attention_heads"):
@@ -662,7 +669,7 @@ def set_llama_full_attention_heads(model, full_attention_heads):
             module.full_attention_heads.data = full_attention_heads[layer_idx].to(
                 module.full_attention_heads.device, module.full_attention_heads.dtype
             )
-    elif isinstance(model, LlamaModel):
+    elif isinstance(model, LagunaModel):
         for layer_idx, layer in enumerate(model.layers):
             module = layer.self_attn
             if not hasattr(module, "full_attention_heads"):
@@ -674,7 +681,7 @@ def set_llama_full_attention_heads(model, full_attention_heads):
         raise ValueError("Model type not supported")
 
 
-def map_llama_full_attention_heads(model, func):
+def map_laguna_full_attention_heads(model, func):
     if isinstance(model, TensorParallelPreTrainedModel):
         for shard in model.wrapped_model.module_shards:
             for layer in shard.model.layers:
@@ -682,13 +689,13 @@ def map_llama_full_attention_heads(model, func):
                 if not hasattr(module, "full_attention_heads"):
                     continue
                 func(module.full_attention_heads)
-    elif isinstance(model, LlamaForCausalLM):
+    elif isinstance(model, LagunaForCausalLM):
         for layer in model.model.layers:
             module = layer.self_attn
             if not hasattr(module, "full_attention_heads"):
                 continue
             func(module.full_attention_heads)
-    elif isinstance(model, LlamaModel):
+    elif isinstance(model, LagunaModel):
         for layer in model.layers:
             module = layer.self_attn
             if not hasattr(module, "full_attention_heads"):
