@@ -37,6 +37,11 @@ NUM_STEPS="${NUM_STEPS:-1}"
 SAVE_STEPS="${SAVE_STEPS:-5}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 MAX_LENGTH="${MAX_LENGTH:-768}"
+DATASET_NAME="${DATASET_NAME:-}"
+DATASET_REPO_ID="${DATASET_REPO_ID:-}"
+DATASET_FILENAME="${DATASET_FILENAME:-}"
+DATASET_FORMAT="${DATASET_FORMAT:-multiple_passkey}"
+SMOKE_DATASET="${SMOKE_DATASET:-false}"
 CONTEXT_LENGTH_MIN="${CONTEXT_LENGTH_MIN:-$MAX_LENGTH}"
 CONTEXT_LENGTH_MAX="${CONTEXT_LENGTH_MAX:-$MAX_LENGTH}"
 CONTEXT_LENGTHS_NUM_INTERVALS="${CONTEXT_LENGTHS_NUM_INTERVALS:-1}"
@@ -76,9 +81,9 @@ LAUNCH_ARGS=(
   --git-ref "$GIT_REF" \
   --image "$HF_JOB_IMAGE" \
   --model-name "$MODEL_NAME" \
-  --smoke-dataset \
   --flavor "$HF_FLAVOR" \
   --timeout "$TIMEOUT" \
+  --env DATASET_FORMAT="$DATASET_FORMAT" \
   --env NPROC_PER_NODE="$NPROC_PER_NODE" \
   --env NUM_STEPS="$NUM_STEPS" \
   --env SAVE_STEPS="$SAVE_STEPS" \
@@ -90,6 +95,17 @@ LAUNCH_ARGS=(
   --env DEPTH_RATIO_NUM_INTERVALS="$DEPTH_RATIO_NUM_INTERVALS" \
   --env NUM_PASSKEYS="$NUM_PASSKEYS"
 )
+
+if [[ "$SMOKE_DATASET" == "true" ]]; then
+  LAUNCH_ARGS+=(--smoke-dataset)
+elif [[ -n "$DATASET_NAME" ]]; then
+  LAUNCH_ARGS+=(--dataset-name "$DATASET_NAME")
+elif [[ -n "$DATASET_REPO_ID" && -n "$DATASET_FILENAME" ]]; then
+  LAUNCH_ARGS+=(--dataset-repo-id "$DATASET_REPO_ID" --dataset-filename "$DATASET_FILENAME")
+else
+  echo "Refusing to launch: set DATASET_NAME, or DATASET_REPO_ID and DATASET_FILENAME, or SMOKE_DATASET=true." >&2
+  exit 1
+fi
 
 if [[ -n "$OUTPUT_REPO_ID" ]]; then
   LAUNCH_ARGS+=(--output-repo-id "$OUTPUT_REPO_ID")
