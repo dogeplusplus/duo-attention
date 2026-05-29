@@ -118,16 +118,25 @@ def upload_outputs():
     if not output_repo_id:
         return
 
-    output_dir = os.environ.get("OUTPUT_DIR", "/workspace/duo-attention-output")
+    output_dir = Path(os.environ.get("OUTPUT_DIR", "/workspace/duo-attention-output"))
+    adapter_dir = output_dir / "hf_duo_laguna_adapter"
+    upload_adapter = env_bool("UPLOAD_ADAPTER_PACKAGE", True) and adapter_dir.exists()
+    folder_path = adapter_dir if upload_adapter else output_dir
+    path_in_repo = "" if upload_adapter else os.environ.get(
+        "OUTPUT_PATH_IN_REPO", "duo_attention_training"
+    )
     api = HfApi(token=os.environ.get("HF_TOKEN"))
     api.create_repo(output_repo_id, repo_type="model", exist_ok=True)
     api.upload_folder(
         repo_id=output_repo_id,
         repo_type="model",
-        folder_path=output_dir,
-        path_in_repo=os.environ.get("OUTPUT_PATH_IN_REPO", "duo_attention_training"),
+        folder_path=str(folder_path),
+        path_in_repo=path_in_repo,
         commit_message=os.environ.get(
-            "OUTPUT_COMMIT_MESSAGE", "Upload DuoAttention training artifacts"
+            "OUTPUT_COMMIT_MESSAGE",
+            "Upload DuoAttention Laguna adapter"
+            if upload_adapter
+            else "Upload DuoAttention training artifacts",
         ),
     )
 

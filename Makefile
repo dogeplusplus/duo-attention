@@ -1,10 +1,15 @@
 .DEFAULT_GOAL := help
 
+comma := ,
+
 GIT_REF ?= $(shell git branch --show-current)
 CONFIG_FILE ?= configs/hf_train.json
 DOCKER ?= docker
 DOCKER_IMAGE ?= kerorogunso/duo-attention-deps:cuda12.4
 DOCKER_PLATFORM ?= linux/amd64
+DOCKER_PREFETCH_MODEL ?= poolside/Laguna-XS.2
+DOCKER_PREFETCH_REVISION ?=
+DOCKER_BUILD_SECRETS ?= $(if $(HF_TOKEN),--secret id=hf_token$(comma)env=HF_TOKEN,)
 
 BENCH_CONFIG_FILE ?= configs/laguna_benchmark.json
 
@@ -29,6 +34,9 @@ docker-build:
 	$(DOCKER) build \
 		--platform "$(DOCKER_PLATFORM)" \
 		--build-arg BASE_IMAGE=pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel \
+		--build-arg PREFETCH_MODEL_ID="$(DOCKER_PREFETCH_MODEL)" \
+		--build-arg PREFETCH_MODEL_REVISION="$(DOCKER_PREFETCH_REVISION)" \
+		$(DOCKER_BUILD_SECRETS) \
 		-t "$(DOCKER_IMAGE)" \
 		-f Dockerfile .
 

@@ -4,6 +4,8 @@ ARG BASE_IMAGE=pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
+    HF_HOME=/opt/hf-cache \
+    HUGGINGFACE_HUB_CACHE=/opt/hf-cache/hub \
     PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -39,6 +41,34 @@ ARG INSTALL_FLASH_ATTN=0
 RUN if [ "${INSTALL_FLASH_ATTN}" = "1" ]; then \
         python -m pip install flash-attn --no-build-isolation; \
     fi
+
+ARG PREFETCH_MODEL_ID=""
+ARG PREFETCH_MODEL_REVISION=""
+RUN --mount=type=secret,id=hf_token <<'SH'
+set -eu
+if [ -n "${PREFETCH_MODEL_ID}" ]; then
+    python - "${PREFETCH_MODEL_ID}" "${PREFETCH_MODEL_REVISION}" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+from huggingface_hub import snapshot_download
+
+model_id = sys.argv[1]
+revision = sys.argv[2] or None
+token_path = Path("/run/secrets/hf_token")
+token = token_path.read_text().strip() if token_path.exists() else None
+
+snapshot_download(
+    repo_id=model_id,
+    repo_type="model",
+    revision=revision,
+    token=token or None,
+)
+print(f"Cached Hugging Face model: {model_id} revision={revision or 'default'}")
+PY
+fi
+SH
 
 WORKDIR /workspace
 

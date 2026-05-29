@@ -1,4 +1,6 @@
 import os
+import shutil
+from pathlib import Path
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -47,6 +49,124 @@ from transformers.models.mistral.modeling_mistral import (
     MistralRMSNorm,
 )
 from transformers.models.laguna.modeling_laguna import LagunaDecoderLayer
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+HF_SUBMISSION_DIR = REPO_ROOT / "hf_submission"
+
+
+def _write_text(path, content):
+    with open(path, "w") as f:
+        f.write(content)
+
+
+def package_duo_attention_hf_artifacts(
+    args,
+    config,
+    full_attention_heads,
+    full_attention_heads_list,
+):
+    if args.output_dir is None:
+        return None
+
+    package_dir = Path(args.output_dir) / "hf_duo_laguna_adapter"
+    duo_dir = package_dir / "duo_attention"
+    duo_dir.mkdir(parents=True, exist_ok=True)
+
+    heads_tensor = torch.stack(
+        [head.detach().float().cpu() for head in full_attention_heads]
+    )
+    torch.save(heads_tensor, duo_dir / "full_attention_heads.pt")
+    save_full_attention_heads(
+        full_attention_heads_list,
+        str(duo_dir / "full_attention_heads.tsv"),
+    )
+
+    duo_metadata = {
+        "enabled": True,
+        "architecture": getattr(config, "model_type", None),
+        "base_model_name_or_path": args.model_name,
+        "base_config_name_or_path": args.config_name,
+        "full_attention_heads_file": "duo_attention/full_attention_heads.pt",
+        "full_attention_heads_tsv_file": "duo_attention/full_attention_heads.tsv",
+        "sink_size": args.deploy_sink_size or args.sink_size,
+        "recent_size": args.deploy_recent_size or args.recent_size,
+        "training_sink_size": args.sink_size,
+        "training_recent_size": args.recent_size,
+        "patch_mode": "eval",
+        "format_version": 1,
+    }
+
+    with open(duo_dir / "config.json", "w") as f:
+        json.dump(duo_metadata, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+    model_config = config.to_dict()
+    model_config["architectures"] = ["DuoLagunaForCausalLM"]
+    model_config["duo_attention"] = duo_metadata
+    auto_map = model_config.get("auto_map") or {}
+    auto_map["AutoModelForCausalLM"] = "modeling_duo_laguna.DuoLagunaForCausalLM"
+    model_config["auto_map"] = auto_map
+
+    with open(package_dir / "config.json", "w") as f:
+        json.dump(model_config, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+    shutil.copy2(
+        HF_SUBMISSION_DIR / "modeling_duo_laguna.py",
+        package_dir / "modeling_duo_laguna.py",
+    )
+    shutil.copy2(
+        HF_SUBMISSION_DIR / "duo_laguna_remote.py",
+        package_dir / "duo_laguna_remote.py",
+    )
+
+    _write_text(
+        package_dir / "requirements.txt",
+        "\n".join(["torch", "transformers>=5.9.0", "huggingface_hub", "numpy"]) + "\n",
+    )
+    _write_text(
+        package_dir / "README.md",
+        f"""---
+library_name: transformers
+base_model: {args.model_name}
+tags:
+- laguna
+- duo-attention
+- custom-code
+---
+
+# DuoAttention Laguna Adapter
+
+This repository contains the learned DuoAttention attention-head weights and
+custom loading code for `{args.model_name}`. It intentionally does not include
+the full Laguna base-model weights.
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+repo_id = "<this-repo-id>"
+base_model = "{args.model_name}"
+tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(
+    repo_id,
+    trust_remote_code=True,
+    torch_dtype="auto",
+    device_map="auto",
+)
+```
+""",
+    )
+    return package_dir
+
+
+def log_wandb_artifacts(package_dir):
+    if package_dir is None or wandb.run is None:
+        return
+    artifact_name = f"{wandb.run.id}-duo-laguna-adapter"
+    artifact = wandb.Artifact(artifact_name, type="model")
+    artifact.add_dir(str(package_dir))
+    wandb.log_artifact(artifact)
 
 
 def setup():
@@ -421,6 +541,18 @@ def main(args):
                 full_attention_heads_list,
                 os.path.join(args.output_dir, "full_attention_heads.tsv"),
             )
+            save_full_attention_heads(
+                full_attention_heads_list,
+                os.path.join(args.output_dir, "full_attention_heads_latest.tsv"),
+            )
+            package_dir = package_duo_attention_hf_artifacts(
+                args,
+                config,
+                full_attention_heads,
+                full_attention_heads_list,
+            )
+            if not args.disable_wandb:
+                log_wandb_artifacts(package_dir)
 
     dist.barrier()
     cleanup()
