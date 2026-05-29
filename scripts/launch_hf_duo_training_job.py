@@ -34,10 +34,10 @@ def build_command(args: argparse.Namespace) -> list[str]:
         )
         dependency_setup = f"""
 apt-get update
-apt-get install -y --no-install-recommends git
-python -m pip install --upgrade pip
+apt-get install -y --no-install-recommends ca-certificates git git-lfs
+python -m pip install --upgrade pip setuptools wheel packaging
 python -m pip install \
-  accelerate datasets huggingface-hub matplotlib sentencepiece transformers wandb zstandard{install_tensor_parallel}
+  accelerate datasets huggingface-hub matplotlib numpy sentencepiece tqdm transformers wandb zstandard{install_tensor_parallel}
 {flash_attn_install}
 """
     command = f"""
