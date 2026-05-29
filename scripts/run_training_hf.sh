@@ -29,7 +29,6 @@ fi
 GIT_REPO_URL="${GIT_REPO_URL:-https://github.com/dogeplusplus/duo-attention.git}"
 GIT_REF="${GIT_REF:-$(git branch --show-current)}"
 HF_JOB_IMAGE="${HF_JOB_IMAGE:-pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel}"
-PREINSTALLED_DEPS="${PREINSTALLED_DEPS:-0}"
 MODEL_NAME="${MODEL_NAME:-poolside/Laguna-XS.2}"
 HF_FLAVOR="${HF_FLAVOR:-a100-large}"
 TIMEOUT="${TIMEOUT:-1h}"
@@ -101,10 +100,6 @@ LAUNCH_ARGS=(
 
 if [[ -n "$OUTPUT_REPO_ID" ]]; then
   LAUNCH_ARGS+=(--output-repo-id "$OUTPUT_REPO_ID")
-fi
-
-if [[ "$PREINSTALLED_DEPS" == "1" || "$PREINSTALLED_DEPS" == "true" ]]; then
-  LAUNCH_ARGS+=(--preinstalled-deps)
 fi
 
 uv run python scripts/launch_hf_duo_training_job.py "${LAUNCH_ARGS[@]}"

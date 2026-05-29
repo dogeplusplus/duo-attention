@@ -23,7 +23,9 @@ RUN python -m pip install --upgrade pip setuptools wheel packaging \
         datasets \
         huggingface-hub \
         matplotlib \
+        numpy \
         sentencepiece \
+        tqdm \
         transformers \
         wandb \
         zstandard
