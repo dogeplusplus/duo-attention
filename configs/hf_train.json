@@ -5,14 +5,10 @@
   "hf_flavor": "a100-large",
   "timeout": "1h",
   "nproc_per_node": "auto",
-<<<<<<< Updated upstream
-  "num_steps": 2000,
-=======
   "dataset_name": "datasets/code_retrieval_all.jsonl",
   "dataset_format": "code_retrieval",
   "smoke_dataset": false,
-  "num_steps": 100,
->>>>>>> Stashed changes
+  "num_steps": 2000,
   "save_steps": 5,
   "batch_size": 1,
   "max_length": 768,

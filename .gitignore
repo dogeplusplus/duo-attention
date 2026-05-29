@@ -8,7 +8,6 @@ models
 *.pt
 *.png
 cache/
-datasets/
 models/
 slurm_log/
 wandb/
