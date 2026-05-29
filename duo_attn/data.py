@@ -270,6 +270,70 @@ class MultiplePasskeyRetrievalDataset(Dataset):
         return dict(input_ids=input_ids, labels=labels)
 
 
+class CodeRetrievalDataset(Dataset):
+    def __init__(
+        self,
+        dataset,
+        tokenizer: transformers.PreTrainedTokenizer,
+        max_length=None,
+        context_field="context_text",
+        supervised_field="supervised_text",
+        pad_to_multiple_of=16,
+    ):
+        super(CodeRetrievalDataset, self).__init__()
+        self.dataset = dataset
+        self.tokenizer = tokenizer
+        self.max_length = (
+            max_length if max_length is not None else tokenizer.model_max_length
+        )
+        self.context_field = context_field
+        self.supervised_field = supervised_field
+        self.pad_to_multiple_of = pad_to_multiple_of
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+        sample = self.dataset[i]
+        context_text = sample[self.context_field]
+        supervised_text = sample[self.supervised_field]
+
+        context_tokens = self.tokenizer.encode(context_text, add_special_tokens=True)
+        supervised_tokens = self.tokenizer.encode(
+            supervised_text, add_special_tokens=False
+        )
+
+        if len(supervised_tokens) == 0:
+            raise ValueError(f"Sample {i} has no supervised tokens")
+
+        max_context_length = self.max_length - len(supervised_tokens)
+        if max_context_length <= 0:
+            raise ValueError(
+                f"Sample {i} supervised text uses {len(supervised_tokens)} tokens, "
+                f"which does not fit within max_length={self.max_length}"
+            )
+
+        context_tokens = context_tokens[:max_context_length]
+
+        remainder = (
+            len(context_tokens) + len(supervised_tokens)
+        ) % self.pad_to_multiple_of
+        if remainder != 0:
+            if len(context_tokens) <= remainder:
+                raise ValueError(
+                    f"Sample {i} cannot be trimmed to a multiple of "
+                    f"{self.pad_to_multiple_of}"
+                )
+            context_tokens = context_tokens[:-remainder]
+
+        input_ids = torch.tensor(context_tokens + supervised_tokens)
+
+        assert input_ids.size(0) % self.pad_to_multiple_of == 0
+
+        labels = torch.tensor([-100] * len(context_tokens) + supervised_tokens)
+        return dict(input_ids=input_ids, labels=labels)
+
+
 @dataclass
 class DataCollator(object):
     """Collate examples for supervised fine-tuning."""

@@ -18,6 +18,7 @@ from duo_attn.utils import (
 )
 from duo_attn.data import (
     get_dataset,
+    CodeRetrievalDataset,
     MultiplePasskeyRetrievalDataset,
     get_supervised_dataloader,
 )
@@ -504,6 +505,12 @@ def main(args):
             context_lengths_num_intervals=args.context_lengths_num_intervals,
             depth_ratio_num_intervals=args.depth_ratio_num_intervals,
             num_passkeys=args.num_passkeys,
+        )
+    elif args.dataset_format == "code_retrieval":
+        train_dataset = CodeRetrievalDataset(
+            haystack_dataset,
+            tokenizer,
+            max_length=args.max_length,
         )
     else:
         raise ValueError(f"Invalid dataset format: {args.dataset_format}")
