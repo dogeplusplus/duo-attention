@@ -46,6 +46,7 @@ from transformers.models.mistral.modeling_mistral import (
     MistralDecoderLayer,
     MistralRMSNorm,
 )
+from transformers.models.laguna.modeling_laguna import LagunaDecoderLayer
 
 
 def setup():
@@ -304,11 +305,15 @@ def main(args):
     # mesh = None
     mesh = DeviceMesh(device_type="cuda", mesh=[i for i in range(world_size)])
 
+    modules_to_shard = {LlamaDecoderLayer, MistralDecoderLayer}
+    if LagunaDecoderLayer is not None:
+        modules_to_shard.add(LagunaDecoderLayer)
+
     apply_fsdp(
         model,
         mesh,
         mp_policy,
-        modules_to_shard={LlamaDecoderLayer, MistralDecoderLayer},
+        modules_to_shard=modules_to_shard,
     )
 
     if rank == 0:

@@ -109,29 +109,52 @@ from transformers import (
     PretrainedConfig,
 )
 from typing import Sequence
-from tensor_parallel.config import Config
-from tensor_parallel.communications import CollectiveOperation
-from tensor_parallel.aux_actions import (
-    gather_kv,
-    select_kv_for_rank,
-    split_inner_dim,
-    split_num_heads,
-)
-from tensor_parallel.state_actions import (
-    Split,
-    SplitInChunks,
-)
 from functools import partial
-import tensor_parallel as tp
-from tensor_parallel.pretrained_model import find_predefined_tensor_parallel_config
-from tensor_parallel.autoconfig import get_default_config
-from tensor_parallel.state_actions import Split
 import re
+
+try:
+    from tensor_parallel.config import Config
+    from tensor_parallel.communications import CollectiveOperation
+    from tensor_parallel.aux_actions import (
+        gather_kv,
+        select_kv_for_rank,
+        split_inner_dim,
+        split_num_heads,
+    )
+    from tensor_parallel.state_actions import (
+        Split,
+        SplitInChunks,
+    )
+    import tensor_parallel as tp
+    from tensor_parallel.pretrained_model import find_predefined_tensor_parallel_config
+    from tensor_parallel.autoconfig import get_default_config
+except ImportError:
+    Config = None
+    CollectiveOperation = None
+    Split = None
+    SplitInChunks = None
+    tp = None
+
+    def _missing_tensor_parallel(*args, **kwargs):
+        raise ImportError(
+            "tensor_parallel is required only when tensor parallelism is enabled. "
+            "Install tensor_parallel or rerun without --enable_tp."
+        )
+
+    gather_kv = _missing_tensor_parallel
+    select_kv_for_rank = _missing_tensor_parallel
+    split_inner_dim = _missing_tensor_parallel
+    split_num_heads = _missing_tensor_parallel
+    find_predefined_tensor_parallel_config = _missing_tensor_parallel
+    get_default_config = _missing_tensor_parallel
 
 
 def get_mistral_config(
     model_config: PretrainedConfig, devices: Sequence[torch.device]
 ) -> Config:
+    if Config is None:
+        _missing_tensor_parallel()
+
     assert (
         model_config.model_type == "mistral"
     ), f"Trying to pass {model_config.model_type} as mistral config"
