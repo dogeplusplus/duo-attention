@@ -57,6 +57,7 @@ def main():
     parser.add_argument("--dataset-name", default=None, help="Dataset path visible inside the job.")
     parser.add_argument("--dataset-repo-id", default=None, help="Hub dataset repo to download from.")
     parser.add_argument("--dataset-filename", default=None, help="Filename within --dataset-repo-id.")
+    parser.add_argument("--smoke-dataset", action="store_true", help="Create a tiny synthetic JSONL dataset inside the job.")
     parser.add_argument("--output-repo-id", default=None, help="Optional model repo for training artifacts.")
     parser.add_argument("--hf-token-env", default="HF_TOKEN", help="Local env var containing a Hub token.")
     parser.add_argument("--wandb-token-env", default="WANDB_API_KEY", help="Local env var containing a W&B key.")
@@ -77,6 +78,17 @@ def main():
         env["DATASET_REPO_ID"] = args.dataset_repo_id
     if args.dataset_filename:
         env["DATASET_FILENAME"] = args.dataset_filename
+    if args.smoke_dataset:
+        env["CREATE_SMOKE_DATASET"] = "true"
+        env.setdefault("NUM_STEPS", "1")
+        env.setdefault("SAVE_STEPS", "1")
+        env.setdefault("BATCH_SIZE", "1")
+        env.setdefault("MAX_LENGTH", "768")
+        env.setdefault("CONTEXT_LENGTH_MIN", "768")
+        env.setdefault("CONTEXT_LENGTH_MAX", "768")
+        env.setdefault("CONTEXT_LENGTHS_NUM_INTERVALS", "1")
+        env.setdefault("DEPTH_RATIO_NUM_INTERVALS", "10")
+        env.setdefault("NUM_PASSKEYS", "1")
     if args.output_repo_id:
         env["OUTPUT_REPO_ID"] = args.output_repo_id
     env.update(parse_key_value(args.env))
@@ -90,7 +102,7 @@ def main():
         secrets.setdefault("WANDB_API_KEY", wandb_token)
         env["DISABLE_WANDB"] = "false"
 
-    if not args.dataset_name and not (args.dataset_repo_id and args.dataset_filename):
+    if not args.smoke_dataset and not args.dataset_name and not (args.dataset_repo_id and args.dataset_filename):
         raise ValueError("Pass --dataset-name or both --dataset-repo-id and --dataset-filename.")
 
     job = run_job(

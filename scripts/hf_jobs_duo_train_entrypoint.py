@@ -2,6 +2,7 @@
 """Run the existing DuoAttention trainer inside a Hugging Face Hub Job."""
 
 import os
+import json
 import shlex
 import subprocess
 from pathlib import Path
@@ -26,6 +27,18 @@ def resolve_dataset_name() -> str:
     dataset_name = os.environ.get("DATASET_NAME")
     dataset_repo_id = os.environ.get("DATASET_REPO_ID")
     dataset_filename = os.environ.get("DATASET_FILENAME")
+
+    if env_bool("CREATE_SMOKE_DATASET", False):
+        smoke_path = Path(os.environ.get("SMOKE_DATASET_PATH", "/tmp/duo_smoke_dataset.jsonl"))
+        smoke_path.parent.mkdir(parents=True, exist_ok=True)
+        smoke_text = os.environ.get(
+            "SMOKE_DATASET_TEXT",
+            "This is a compact synthetic story used only for DuoAttention smoke tests. ",
+        )
+        with smoke_path.open("w", encoding="utf-8") as f:
+            for _ in range(int(os.environ.get("SMOKE_DATASET_ROWS", "64"))):
+                f.write(json.dumps({"text": smoke_text * 256}) + "\n")
+        return str(smoke_path)
 
     if dataset_repo_id and dataset_filename:
         dataset_name = hf_hub_download(
