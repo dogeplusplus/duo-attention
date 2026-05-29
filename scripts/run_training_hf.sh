@@ -57,13 +57,6 @@ if (( NUM_STEPS < 5 )); then
   exit 1
 fi
 
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "Refusing to launch: the working tree has uncommitted changes." >&2
-  echo "Hub Jobs clone only committed/pushed code, so these local changes would be missing in the job." >&2
-  echo "Commit and push first, then rerun this script." >&2
-  exit 1
-fi
-
 if [[ -z "$REMOTE_SHA" ]]; then
   echo "Remote branch '$GIT_REF' was not found at $GIT_REPO_URL." >&2
   echo "Push the branch first, or run with GIT_REF=<pushed-branch>." >&2
