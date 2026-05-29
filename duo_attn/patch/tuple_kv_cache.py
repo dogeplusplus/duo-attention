@@ -2,6 +2,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.functional as F
+from typing import List, Union
 
 from transformers.models.llama.modeling_llama import (
     LlamaForCausalLM,
