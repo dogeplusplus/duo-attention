@@ -6,6 +6,7 @@ import math
 import os
 import sys
 import time
+from numbers import Number
 from pathlib import Path
 
 import numpy as np
@@ -657,9 +658,22 @@ def log_to_wandb(args, records, plots):
             for key in record.keys():
                 if key not in columns:
                     columns.append(key)
+        numeric_columns = {
+            column
+            for column in columns
+            if any(isinstance(record.get(column), Number) for record in records)
+        }
         table = wandb.Table(columns=columns)
         for record in records:
-            table.add_data(*[record.get(column, "") for column in columns])
+            row = []
+            for column in columns:
+                value = record.get(column)
+                if value is None and column in numeric_columns:
+                    value = math.nan
+                elif value is None:
+                    value = ""
+                row.append(value)
+            table.add_data(*row)
     else:
         table = wandb.Table(columns=["empty"])
     wandb.log({"benchmark/results": table})
