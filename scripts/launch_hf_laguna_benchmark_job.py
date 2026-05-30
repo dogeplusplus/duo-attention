@@ -29,6 +29,12 @@ def build_command(job_config):
     git_ref = job_config.get("git_ref")
     ref_clause = f" --branch {git_ref}" if git_ref else ""
     git_repo_url = job_config["git_repo_url"]
+    install_flash_attn = job_config.get("install_flash_attn", False)
+    flash_attn_clause = (
+        "python -m pip install flash-attn --no-build-isolation\n"
+        if install_flash_attn
+        else ""
+    )
     return [
         "bash",
         "-lc",
@@ -37,6 +43,13 @@ set -euxo pipefail
 git clone --depth 1{ref_clause} {git_repo_url} /workspace/duo-attention
 cd /workspace/duo-attention
 python -m pip install --ignore-requires-python --no-deps -e .
+{flash_attn_clause}python - <<'PY'
+try:
+    import flash_attn
+    print("flash-attn", getattr(flash_attn, "__version__", "unknown"))
+except Exception as exc:
+    print("flash-attn unavailable:", repr(exc))
+PY
 python scripts/hf_jobs_laguna_benchmark_entrypoint.py
 """,
     ]

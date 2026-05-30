@@ -3,6 +3,7 @@
   "git_ref": "main",
   "hf_job_image": "kerorogunso/duo-attention-deps:cuda12.4",
   "hf_flavor": "a100-large",
+  "install_flash_attn": true,
   "timeout": "4h",
   "namespace": ""
 }
