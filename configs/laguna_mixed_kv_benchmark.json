@@ -5,7 +5,7 @@
   "full_attention_heads": "",
   "sink_size": 128,
   "recent_size": 256,
-  "prompt_lengths": [512, 1462, 2048],
+  "prompt_lengths": [512, 1024, 1462],
   "decode_lengths": [1, 16, 64],
   "batch_size": 1,
   "warmup": 1,
