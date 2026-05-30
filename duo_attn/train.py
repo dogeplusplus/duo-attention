@@ -54,6 +54,14 @@ from transformers.models.laguna.modeling_laguna import LagunaDecoderLayer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HF_SUBMISSION_DIR = REPO_ROOT / "hf_submission"
+MODEL_CARD_FIGURES = [
+    "method1.jpg",
+    "method2.jpg",
+    "kv_capacity.jpg",
+    "efficiency_prefilling.jpg",
+    "efficiency_decoding.jpg",
+    "laguna_optimized_gate_values_booksum.png",
+]
 
 
 def _write_text(path, content):
@@ -72,6 +80,16 @@ def _attention_heads_to_tensor(full_attention_heads, full_attention_heads_list):
         else:
             normalized_heads.append(torch.as_tensor(head, dtype=torch.float32).cpu())
     return torch.stack(normalized_heads)
+
+
+def _copy_model_card_figures(package_dir):
+    figures_dir = package_dir / "figures"
+    figures_dir.mkdir(exist_ok=True)
+    for figure_name in MODEL_CARD_FIGURES:
+        source = REPO_ROOT / "figures" / figure_name
+        if not source.exists():
+            raise FileNotFoundError(f"Missing model-card figure: {source}")
+        shutil.copy2(source, figures_dir / figure_name)
 
 
 def package_duo_attention_hf_artifacts(
@@ -136,11 +154,14 @@ def package_duo_attention_hf_artifacts(
         HF_SUBMISSION_DIR / "duo_laguna_remote.py",
         package_dir / "duo_laguna_remote.py",
     )
+    _copy_model_card_figures(package_dir)
 
     _write_text(
         package_dir / "requirements.txt",
         "\n".join(["torch", "transformers>=5.9.0", "huggingface_hub", "numpy"]) + "\n",
     )
+    deploy_sink_size = duo_metadata["sink_size"]
+    deploy_recent_size = duo_metadata["recent_size"]
     _write_text(
         package_dir / "README.md",
         f"""---
@@ -157,6 +178,105 @@ tags:
 This repository contains the learned DuoAttention attention-head weights and
 custom loading code for `{args.model_name}`. It intentionally does not include
 the full Laguna base-model weights or tokenizer files.
+
+## Summary
+
+DuoAttention is a KV-cache reduction method for long-context decoder models. It
+learns which KV heads need full-context memory for retrieval-heavy behavior and
+lets the remaining heads use a streaming cache made from a fixed sink window and
+a recent-token window. The idea is simple: not every attention head needs to
+carry the whole past sequence. Keeping full history only for the heads that use
+it preserves long-range retrieval behavior while reducing KV-cache growth for
+the rest.
+
+For this adapter, the learned head mask is packaged separately from the base
+Laguna weights. At load time, the custom model code reads
+`duo_attention/full_attention_heads.pt`, patches the Laguna attention modules,
+and enables DuoAttention inference with sink size `{deploy_sink_size}` and
+recent size `{deploy_recent_size}`.
+
+## Why It Works
+
+- Transformer KV-cache memory scales with sequence length, layer count, KV head
+  count, head dimension, and dtype.
+- DuoAttention reduces the effective cache footprint by splitting KV heads into
+  full-context heads and streaming heads.
+- Full-context heads retain all prior tokens for retrieval and global-memory
+  behavior.
+- Streaming heads keep only sink tokens plus the most recent tokens, limiting
+  cache growth while preserving local continuity and stable prefix anchoring.
+
+## Benefits
+
+- Smaller KV-cache footprint for long prompts and long decode workloads.
+- A deployable adapter artifact that avoids republishing the full Laguna base
+  model.
+- Custom `trust_remote_code` loading that applies the Laguna patch
+  automatically.
+- Benchmark tooling for base-vs-Duo latency and KV-cache utilization, including
+  static Duo KV-cache measurements.
+
+## Figures
+
+Selected figures from the DuoAttention paper show the method, cache tradeoff,
+and latency motivation. The final figure is Laguna-specific and visualizes the
+optimized gating values learned for this adapter.
+
+<img src="figures/method1.jpg" alt="DuoAttention retrieval and streaming head split" width="820">
+
+<img src="figures/method2.jpg" alt="DuoAttention full and streaming KV-cache pattern" width="820">
+
+<img src="figures/kv_capacity.jpg" alt="DuoAttention KV-cache capacity comparison" width="620">
+
+<img src="figures/efficiency_prefilling.jpg" alt="DuoAttention prefilling efficiency" width="820">
+
+<img src="figures/efficiency_decoding.jpg" alt="DuoAttention decoding efficiency" width="820">
+
+<img src="figures/laguna_optimized_gate_values_booksum.png" alt="Laguna optimized DuoAttention gating values" width="420">
+
+Paper reference: [DuoAttention: Efficient Long-Context LLM Inference with Retrieval and Streaming Heads](https://arxiv.org/abs/2410.10819).
+
+## Training
+
+The adapter is produced by training per-layer, per-KV-head DuoAttention scores
+on long-context retrieval-style data. During training, the model learns which KV
+heads should remain full-context. The final artifact stores the learned
+`full_attention_heads` tensor and a small `duo_attention` config block with the
+base model id, sink/recent sizes, and custom-code metadata.
+
+This package contains adapter state only:
+
+- `duo_attention/full_attention_heads.pt`
+- `config.json` with the DuoAttention metadata and remote-code mapping
+- custom Laguna loading/patch code
+- `requirements.txt`
+
+## Changes In This Submission
+
+Engineering changes:
+
+- Added Hugging Face Hub packaging for adapter-only DuoAttention artifacts.
+- Added custom `AutoModelForCausalLM` loading via `trust_remote_code=True`.
+- Added automatic loading of DuoAttention head weights from the Hub repo.
+- Added a Laguna-specific benchmark suite for prefill latency, decode latency,
+  KV-cache size, active KV-cache utilization, plots, JSONL/CSV output, and W&B
+  artifact logging.
+- Added Hugging Face Jobs scripts for training and evaluation runs.
+- Added local and Hub dataset loading support for training datasets.
+- Added Mac/local smoke-test paths and PyTorch fallback paths where practical.
+
+Laguna-specific / novel changes:
+
+- Ported DuoAttention patching from Llama/Mistral-style modules to Laguna's
+  attention structure.
+- Accounted for Laguna's gated attention output projection path.
+- Added Laguna tuple KV-cache compatibility for ordinary generation.
+- Added Laguna static Duo KV-cache support for measuring cache allocation and
+  utilization.
+- Added head reordering for Laguna Q/K/V/gating/output projections so full and
+  streaming KV heads can be separated consistently.
+- Preserved adapter-only distribution so users load the gated/base Laguna model
+  separately from the learned DuoAttention heads.
 
 Install the optional tokenizer dependencies if they are not already present:
 
