@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 
 def flash_attn_func(
@@ -15,26 +16,18 @@ def flash_attn_func(
         key_states = key_states.repeat_interleave(repeat, dim=2)
         value_states = value_states.repeat_interleave(repeat, dim=2)
 
-    scale = softmax_scale if softmax_scale is not None else query_states.shape[-1] ** -0.5
-    attn_weights = torch.einsum("bqhd,bkhd->bhqk", query_states, key_states) * scale
-
-    if causal:
-        q_len = query_states.shape[1]
-        kv_len = key_states.shape[1]
-        causal_mask = torch.ones(
-            q_len,
-            kv_len,
-            dtype=torch.bool,
-            device=query_states.device,
-        ).triu(kv_len - q_len + 1)
-        attn_weights = attn_weights.masked_fill(causal_mask[None, None], float("-inf"))
-
-    attn_weights = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
-        query_states.dtype
+    query_states = query_states.transpose(1, 2)
+    key_states = key_states.transpose(1, 2)
+    value_states = value_states.transpose(1, 2)
+    attn_output = F.scaled_dot_product_attention(
+        query_states,
+        key_states,
+        value_states,
+        dropout_p=dropout_p,
+        is_causal=causal,
+        scale=softmax_scale,
     )
-    if dropout_p:
-        attn_weights = torch.nn.functional.dropout(attn_weights, p=dropout_p)
-    return torch.einsum("bhqk,bkhd->bqhd", attn_weights, value_states)
+    return attn_output.transpose(1, 2)
 
 
 def flash_attn_varlen_func(*args, **kwargs):
