@@ -85,7 +85,8 @@ Paper: [DuoAttention: Efficient Long-Context LLM Inference with Retrieval and St
 ## Laguna Adapter Figure
 
 This figure visualizes the optimized Laguna DuoAttention gating values produced
-for this adapter.
+for this adapter. Red indicates higher head importance, while blue indicates
+lower head importance.
 
 <img src="figures/laguna_optimized_gate_values_booksum.png" alt="Laguna optimized DuoAttention gating values" width="420">
 
@@ -332,6 +333,9 @@ Paper: [DuoAttention: Efficient Long-Context LLM Inference with Retrieval and St
 ## Laguna Adapter Figure
 
 <img src="figures/laguna_optimized_gate_values_booksum.png" alt="Laguna optimized DuoAttention gating values" width="420">
+
+Red indicates higher head importance, while blue indicates lower head
+importance.
 
 ## How Alpha Is Used
 
