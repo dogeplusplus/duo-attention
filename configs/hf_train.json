@@ -5,7 +5,7 @@
   "hf_flavor": "a100-large",
   "timeout": "4h",
   "nproc_per_node": "auto",
-  "dataset_name": "datasets/locobench_code_retrieval_all.jsonl.gz",
+  "dataset_name": "experiment_data/locobench_code_retrieval_all.jsonl.gz",
   "dataset_config_name": "",
   "dataset_format": "code_retrieval",
   "smoke_dataset": false,
