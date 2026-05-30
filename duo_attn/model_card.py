@@ -51,10 +51,12 @@ Team: KV Tenants
 Authors: Albert Chung and Cameron Wheeler
 
 DuoAttention reduces long-context KV-cache growth by learning which KV heads
-need full history and letting the remaining heads keep only a sink window plus
-recent tokens. This Laguna adapter loads the base model, applies the learned
-head mask from `duo_attention/full_attention_heads.pt`, and enables DuoAttention
-with sink size `{sink_size}` and recent size `{recent_size}`.
+are sensitive to long-range retrieval. In the original DuoAttention method,
+those heads keep full attention while the remaining heads use a sink window plus
+recent tokens. This Laguna adapter uses the same learned alpha signal, but
+interprets it as a KV precision policy: important retrieval heads keep FP8 KV
+cache, while less retrieval-sensitive streaming heads can be quantized more
+aggressively.
 
 ## Why Use It
 
@@ -63,6 +65,8 @@ with sink size `{sink_size}` and recent size `{recent_size}`.
 - `trust_remote_code=True` loading applies the Laguna DuoAttention patch.
 - Laguna-specific support for gated attention projections and KV-head
   reordering.
+- Mixed-precision interpretation of the learned alpha values for Laguna KV
+  cache retention and quantization.
 
 ## Figures From The DuoAttention Paper
 
@@ -84,6 +88,27 @@ This figure visualizes the optimized Laguna DuoAttention gating values produced
 for this adapter.
 
 <img src="figures/laguna_optimized_gate_values_booksum.png" alt="Laguna optimized DuoAttention gating values" width="420">
+
+## How Alpha Is Used
+
+The DuoAttention paper assigns a trainable gate value, alpha, to each attention
+head. During training, each head blends the output of full attention with the
+output of streaming attention, and the alpha values are optimized to match the
+full-attention model while a regularizer pushes unnecessary heads toward
+streaming behavior. During inference, the learned alpha values are converted
+into a per-head deployment policy.
+
+In the original paper, alpha selects which heads use full attention and which
+heads use streaming attention. In this Laguna submission, we use the same signal
+for a mixed-precision cache policy: heads with high retrieval importance keep
+their KV cache at full production precision, while heads with lower retrieval
+importance are candidates for heavy KV quantization.
+
+For Laguna-XS.2, most high-alpha heads appear in layers that are already
+configured as full-attention layers. A smaller but meaningful set of high-alpha
+heads also appears inside sliding-window layers, which suggests that some
+sliding-window heads still carry long-context retrieval information and should
+not all be treated as uniformly disposable.
 
 ## Laguna Results
 
@@ -118,6 +143,11 @@ W&B run: [ox2c0m6s](https://wandb.ai/dogeplusplus/DuoAttention/runs/ox2c0m6s)
   streaming heads.
 - Reordered Laguna Q/K/V/gating/output projections so full and streaming KV
   heads remain aligned after patching.
+- Reinterpreted DuoAttention alpha values as a Laguna KV precision policy:
+  retrieval-important heads retain FP8 KV cache, while streaming heads are
+  candidates for packed INT4 cache.
+- Observed that most important heads are in Laguna full-attention layers, while
+  some sliding-window heads also remain important for long-context retrieval.
 - Added adapter-only loading that fetches the base Laguna model separately and
   applies the learned `full_attention_heads` tensor at load time.
 - Kept decode compatible with the patched tuple KV cache path used by the
@@ -278,9 +308,12 @@ Team: KV Tenants
 
 Authors: Albert Chung and Cameron Wheeler
 
-DuoAttention reduces long-context KV-cache growth by keeping full history only
-for learned retrieval/global heads while streaming the remaining heads with a
-sink window plus recent tokens.
+DuoAttention reduces long-context KV-cache growth by learning per-head alpha
+values that identify retrieval-sensitive heads. In the original paper, alpha
+selects full-attention heads versus streaming heads. For Laguna, this submission
+uses the same signal as a mixed-precision KV cache policy: high-importance heads
+retain FP8 KV cache, while lower-importance streaming heads are candidates for
+packed INT4 KV cache.
 
 ## Figures From The DuoAttention Paper
 
@@ -300,6 +333,19 @@ Paper: [DuoAttention: Efficient Long-Context LLM Inference with Retrieval and St
 
 <img src="figures/laguna_optimized_gate_values_booksum.png" alt="Laguna optimized DuoAttention gating values" width="420">
 
+## How Alpha Is Used
+
+During DuoAttention training, each attention head receives a trainable alpha
+value that blends full-attention output with streaming-attention output. The
+training objective keeps the blended model close to the full-attention model,
+while regularization encourages heads to use the cheaper path when possible.
+At inference time, alpha is converted into a per-head deployment decision.
+
+For Laguna, we use alpha to identify which heads should keep higher-precision KV
+state rather than only deciding full attention versus streaming attention. Most
+important heads are concentrated in full-attention layers, but some heads in
+sliding-window layers also appear important for long-context retrieval.
+
 ## Laguna Results
 
 On `poolside/Laguna-XS.2`, the mixed-precision KV benchmark compares dense FP8
@@ -315,6 +361,7 @@ Job: [6a1ab49e5c8d10ffa11088c0](https://huggingface.co/jobs/dogeplusplus/6a1ab49
 - Preserved the `g_proj` gated output path while splitting full-context and
   streaming heads.
 - Reordered Laguna Q/K/V/gating/output projections so head groups stay aligned.
+- Reinterpreted alpha values as a mixed-precision Laguna KV cache policy.
 - Kept decode compatible with the patched tuple KV cache path.
 
 ## Usage
