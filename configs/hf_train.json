@@ -9,7 +9,7 @@
   "dataset_config_name": "",
   "dataset_format": "code_retrieval",
   "smoke_dataset": false,
-  "num_steps": 500,
+  "num_steps": 10,
   "save_steps": 5,
   "batch_size": 1,
   "max_length": 100000,
