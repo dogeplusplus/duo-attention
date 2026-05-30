@@ -10,6 +10,7 @@ MODEL_CARD_FIGURES = [
     "efficiency_prefilling.jpg",
     "efficiency_decoding.jpg",
     "laguna_optimized_gate_values_booksum.png",
+    "laguna_mixed_kv_reduction_pct.png",
 ]
 
 
@@ -82,12 +83,28 @@ for this adapter.
 
 ## Laguna Results
 
-We ran the model-card example as a Hugging Face Job on `poolside/Laguna-XS.2`
-with a 1,462-token retrieval-style prompt and 64 manual greedy decode steps.
-The DuoAttention adapter reduced the measured KV cache from `228.44 MiB` to
-`121.38 MiB`, a `46.87%` reduction.
+We ran a mixed-precision KV benchmark as a Hugging Face Job on
+`poolside/Laguna-XS.2`. The base line accounts for dense Laguna FP8 KV cache;
+the DuoAttention path stores retrieval heads as FP8 and streaming heads as
+packed INT4 with per-group scale/zero-point metadata.
 
-Job: [6a1a8e153a4b8cae6044e796](https://huggingface.co/jobs/dogeplusplus/6a1a8e153a4b8cae6044e796)
+| Prompt | Decode | Base KV | Duo KV | KV Reduction |
+| ---: | ---: | ---: | ---: | ---: |
+| 512 | 1 | 40.08 MiB | 24.03 MiB | 40.04% |
+| 512 | 16 | 41.25 MiB | 24.50 MiB | 40.61% |
+| 512 | 64 | 45.00 MiB | 26.00 MiB | 42.22% |
+| 1,024 | 1 | 80.08 MiB | 40.03 MiB | 50.01% |
+| 1,024 | 16 | 81.25 MiB | 40.50 MiB | 50.15% |
+| 1,024 | 64 | 85.00 MiB | 42.00 MiB | 50.59% |
+| 1,462 | 1 | 114.30 MiB | 53.72 MiB | 53.00% |
+| 1,462 | 16 | 115.47 MiB | 54.19 MiB | 53.07% |
+| 1,462 | 64 | 119.22 MiB | 55.69 MiB | 53.29% |
+
+<img src="figures/laguna_mixed_kv_reduction_pct.png" alt="Laguna DuoAttention mixed KV cache reduction" width="820">
+
+Job: [6a1ab49e5c8d10ffa11088c0](https://huggingface.co/jobs/dogeplusplus/6a1ab49e5c8d10ffa11088c0)
+
+W&B run: [ox2c0m6s](https://wandb.ai/dogeplusplus/DuoAttention/runs/ox2c0m6s)
 
 ## Laguna-Specific Changes
 
@@ -277,11 +294,12 @@ Paper: [DuoAttention: Efficient Long-Context LLM Inference with Retrieval and St
 
 ## Laguna Results
 
-On `poolside/Laguna-XS.2`, the model-card Hugging Face Job used a 1,462-token
-retrieval-style prompt and 64 manual greedy decode steps. DuoAttention reduced
-the measured KV cache from `228.44 MiB` to `121.38 MiB`, a `46.87%` reduction.
+On `poolside/Laguna-XS.2`, the mixed-precision KV benchmark compares dense FP8
+base KV cache against DuoAttention with FP8 retrieval heads and packed INT4
+streaming heads. At 1,462 prompt tokens plus 64 decode tokens, KV cache dropped
+from `119.22 MiB` to `55.69 MiB`, a `53.29%` reduction.
 
-Job: [6a1a8e153a4b8cae6044e796](https://huggingface.co/jobs/dogeplusplus/6a1a8e153a4b8cae6044e796)
+Job: [6a1ab49e5c8d10ffa11088c0](https://huggingface.co/jobs/dogeplusplus/6a1ab49e5c8d10ffa11088c0)
 
 ## Laguna-Specific Changes
 
