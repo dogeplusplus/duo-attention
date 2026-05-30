@@ -10,6 +10,7 @@ MODEL_CARD_FIGURES = [
     "efficiency_prefilling.jpg",
     "efficiency_decoding.jpg",
     "laguna_optimized_gate_values_booksum.png",
+    "laguna_head_importance_over_time.gif",
     "laguna_mixed_kv_reduction_pct.png",
 ]
 
@@ -89,6 +90,8 @@ for this adapter. Red indicates higher head importance, while blue indicates
 lower head importance.
 
 <img src="figures/laguna_optimized_gate_values_booksum.png" alt="Laguna optimized DuoAttention gating values" width="420">
+
+<img src="figures/laguna_head_importance_over_time.gif" alt="Laguna DuoAttention head importances over training" width="420">
 
 ## How Alpha Is Used
 
@@ -333,6 +336,8 @@ Paper: [DuoAttention: Efficient Long-Context LLM Inference with Retrieval and St
 ## Laguna Adapter Figure
 
 <img src="figures/laguna_optimized_gate_values_booksum.png" alt="Laguna optimized DuoAttention gating values" width="420">
+
+<img src="figures/laguna_head_importance_over_time.gif" alt="Laguna DuoAttention head importances over training" width="420">
 
 Red indicates higher head importance, while blue indicates lower head
 importance.

@@ -7,8 +7,10 @@ models
 *.pdf
 *.pt
 *.png
+*.gif
 !figures/laguna_optimized_gate_values_booksum.png
 !figures/laguna_mixed_kv_reduction_pct.png
+!figures/laguna_head_importance_over_time.gif
 cache/
 models/
 slurm_log/
