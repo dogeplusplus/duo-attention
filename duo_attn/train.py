@@ -491,7 +491,11 @@ def main(args):
                     f"Trainable parameter: {name} with shape {param.shape}, dtype {param.dtype}, device {param.device}"
                 )
 
-    haystack_dataset = get_dataset(args.dataset_name, split="train")
+    haystack_dataset = get_dataset(
+        args.dataset_name,
+        split=args.split,
+        dataset_config_name=args.dataset_config_name,
+    )
 
     if args.dataset_format == "multiple_passkey":
         train_dataset = MultiplePasskeyRetrievalDataset(

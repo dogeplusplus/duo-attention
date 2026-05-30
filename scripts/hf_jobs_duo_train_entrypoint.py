@@ -92,6 +92,7 @@ def build_train_command() -> list[str]:
     ]
 
     env_arg(train_args, "CONFIG_NAME", "--config_name")
+    env_arg(train_args, "DATASET_CONFIG_NAME", "--dataset_config_name")
     env_arg(train_args, "DATASET_FORMAT", "--dataset_format", "multiple_passkey")
     env_arg(train_args, "LR", "--lr")
     env_arg(train_args, "NUM_STEPS", "--num_steps")

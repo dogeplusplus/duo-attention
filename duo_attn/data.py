@@ -1,6 +1,7 @@
 import torch
 from datasets import load_dataset
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Sequence, Dict
 
 import torch
@@ -8,8 +9,48 @@ import transformers
 from torch.utils.data import Dataset, IterableDataset
 
 
-def get_dataset(dataset_name, split="train", size=None):
-    dataset = load_dataset("json", data_files=dataset_name, split=split)
+def is_local_dataset_path(dataset_name):
+    path = Path(dataset_name).expanduser()
+    if path.exists():
+        return True
+    if dataset_name.startswith(("/", "./", "../", "~")):
+        return True
+    return path.suffix in {
+        ".json",
+        ".jsonl",
+        ".zst",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".zip",
+    }
+
+
+def split_dataset_name_and_config(dataset_name, dataset_config_name=None):
+    if dataset_config_name:
+        return dataset_name, dataset_config_name
+    if "::" in dataset_name:
+        dataset_name, dataset_config_name = dataset_name.split("::", 1)
+        return dataset_name, dataset_config_name or None
+    return dataset_name, None
+
+
+def get_dataset(dataset_name, split="train", size=None, dataset_config_name=None):
+    if is_local_dataset_path(dataset_name):
+        path = Path(dataset_name).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Local dataset file does not exist: {path}. "
+                "Pass an existing JSON/JSONL file, or pass a Hugging Face dataset "
+                "id such as 'ubaada/booksum-complete-cleaned'."
+            )
+        dataset = load_dataset("json", data_files=str(path), split=split)
+    else:
+        dataset_name, dataset_config_name = split_dataset_name_and_config(
+            dataset_name,
+            dataset_config_name,
+        )
+        dataset = load_dataset(dataset_name, dataset_config_name, split=split)
     if size is not None:
         dataset = dataset.select(range(size))
     return dataset

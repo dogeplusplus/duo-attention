@@ -22,6 +22,8 @@ KEY_TO_FLAG = {
     "batch_size": "--batch-size",
     "warmup": "--warmup",
     "steps": "--steps",
+    "duo_cache_mode": "--duo-cache-mode",
+    "prefilling_chunk_size": "--prefilling-chunk-size",
     "device": "--device",
     "dtype": "--dtype",
     "attn_implementation": "--attn-implementation",

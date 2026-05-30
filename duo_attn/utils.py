@@ -23,6 +23,7 @@ def parse_args():
         type=str,
         default="/home/guangxuanx/datasets/Long-Data-Collections/pretrain/pile_sub.jsonl.zst",
     )
+    parser.add_argument("--dataset_config_name", type=str, default=None)
     parser.add_argument("--dataset_format", type=str, default="multiple_passkey")
     parser.add_argument("--split", type=str, default="train")
     parser.add_argument("--lr", type=float, default=1e-1)

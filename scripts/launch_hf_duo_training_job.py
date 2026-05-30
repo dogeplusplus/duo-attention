@@ -43,6 +43,7 @@ def main():
     parser.add_argument("--namespace", default=None)
     parser.add_argument("--model-name", required=True, help="Base model path or Hub id visible inside the job.")
     parser.add_argument("--dataset-name", default=None, help="Dataset path visible inside the job.")
+    parser.add_argument("--dataset-config-name", default=None, help="Optional Hugging Face dataset config name.")
     parser.add_argument("--dataset-repo-id", default=None, help="Hub dataset repo to download from.")
     parser.add_argument("--dataset-filename", default=None, help="Filename within --dataset-repo-id.")
     parser.add_argument("--smoke-dataset", action="store_true", help="Create a tiny synthetic JSONL dataset inside the job.")
@@ -60,6 +61,8 @@ def main():
     }
     if args.dataset_name:
         env["DATASET_NAME"] = args.dataset_name
+    if args.dataset_config_name:
+        env["DATASET_CONFIG_NAME"] = args.dataset_config_name
     if args.dataset_repo_id:
         env["DATASET_REPO_ID"] = args.dataset_repo_id
     if args.dataset_filename:

@@ -19,6 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from duo_attn.patch import enable_duo_attention_eval
+from duo_attn.patch.laguna import enable_laguna_duo_attention_static_kv_cache_eval
+from duo_attn.patch.static_kv_cache import DuoAttentionStaticKVCache
 
 
 def parse_args():
@@ -76,6 +78,24 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--steps", type=int, default=3)
+    parser.add_argument(
+        "--duo-cache-mode",
+        default="tuple",
+        choices=["tuple", "static"],
+        help=(
+            "KV-cache implementation to use for the duo variant. static uses "
+            "DuoAttentionStaticKVCache and reports cache allocation/utilization."
+        ),
+    )
+    parser.add_argument(
+        "--prefilling-chunk-size",
+        type=int,
+        default=0,
+        help=(
+            "Chunk size for static-cache prefill. Defaults to each full prompt in "
+            "one chunk when set to 0."
+        ),
+    )
     parser.add_argument(
         "--device",
         default="cuda" if torch.cuda.is_available() else "cpu",
@@ -164,6 +184,10 @@ def tensor_nbytes(tensor):
     return tensor.numel() * tensor.element_size()
 
 
+def dtype_nbytes(model):
+    return next(model.parameters()).element_size()
+
+
 def cache_nbytes(cache):
     seen = set()
 
@@ -209,6 +233,64 @@ def cache_nbytes(cache):
         return 0
 
     return visit(cache)
+
+
+def dense_kv_cache_nbytes(model, batch_size, tokens):
+    config = model.config
+    head_dim = getattr(
+        config,
+        "head_dim",
+        config.hidden_size // config.num_attention_heads,
+    )
+    return (
+        2
+        * config.num_hidden_layers
+        * batch_size
+        * config.num_key_value_heads
+        * head_dim
+        * tokens
+        * dtype_nbytes(model)
+    )
+
+
+def static_cache_active_nbytes(cache):
+    total = 0
+    for layer_idx in range(cache.num_layers):
+        full_tokens = cache.kv_seq_len_list[layer_idx]
+        streaming_tokens = cache.streaming_kv_seq_len_list[layer_idx]
+        full_key = cache.full_key_states_list[layer_idx]
+        streaming_key = cache.streaming_key_states_list[layer_idx]
+        total += (
+            2
+            * full_key.element_size()
+            * cache.batch_size
+            * full_tokens
+            * full_key.shape[2]
+            * full_key.shape[3]
+        )
+        total += (
+            2
+            * streaming_key.element_size()
+            * cache.batch_size
+            * streaming_tokens
+            * streaming_key.shape[2]
+            * streaming_key.shape[3]
+        )
+    return total
+
+
+def static_cache_metrics(cache, model, tokens):
+    allocated = cache.memory_usage
+    active = static_cache_active_nbytes(cache)
+    dense = dense_kv_cache_nbytes(model, cache.batch_size, tokens)
+    return {
+        "kv_cache_allocated_bytes": allocated,
+        "kv_cache_active_bytes": active,
+        "kv_cache_dense_equivalent_bytes": dense,
+        "kv_cache_utilization": active / allocated if allocated else 0.0,
+        "kv_cache_allocated_vs_dense_ratio": allocated / dense if dense else 0.0,
+        "kv_cache_active_vs_dense_ratio": active / dense if dense else 0.0,
+    }
 
 
 def load_full_attention_heads(path):
@@ -324,7 +406,9 @@ def load_model(args, variant, full_attention_heads):
     model.eval()
     model.to(args.device)
 
-    if variant == "duo":
+    if variant == "duo" and args.duo_cache_mode == "static":
+        enable_laguna_duo_attention_static_kv_cache_eval(model, full_attention_heads)
+    elif variant == "duo":
         enable_duo_attention_eval(
             model,
             full_attention_heads,
@@ -332,6 +416,21 @@ def load_model(args, variant, full_attention_heads):
             recent_size=args.recent_size,
         )
     return model
+
+
+def is_static_duo(args, variant):
+    return variant == "duo" and args.duo_cache_mode == "static"
+
+
+def make_static_cache(args, model, full_attention_heads, max_size):
+    return DuoAttentionStaticKVCache(
+        model,
+        full_attention_heads,
+        args.batch_size,
+        max_size,
+        args.sink_size,
+        args.recent_size,
+    )
 
 
 @torch.no_grad()
@@ -400,12 +499,97 @@ def benchmark_decode(model, input_ids, decode_len, device, warmup, steps):
     return sequence_latencies, final_outputs, peak_memory_bytes(device)
 
 
+def static_prefill_once(model, input_ids, cache, chunk_size):
+    outputs = None
+    if chunk_size <= 0:
+        chunk_size = input_ids.shape[1]
+    for start in range(0, input_ids.shape[1], chunk_size):
+        outputs = model(
+            input_ids=input_ids[:, start : start + chunk_size],
+            past_key_values=cache,
+            use_cache=True,
+        )
+    return outputs
+
+
+def benchmark_static_prefill(
+    model,
+    input_ids,
+    device,
+    warmup,
+    steps,
+    cache_factory,
+    chunk_size,
+):
+    for _ in range(warmup):
+        cache = cache_factory()
+        _ = static_prefill_once(model, input_ids, cache, chunk_size)
+    gc.collect()
+    reset_peak_memory(device)
+
+    latencies = []
+    outputs = None
+    cache = None
+    for _ in range(steps):
+        cache = cache_factory()
+        latency_ms, outputs = time_call(
+            lambda: static_prefill_once(model, input_ids, cache, chunk_size),
+            device,
+        )
+        latencies.append(latency_ms)
+    return latencies, outputs, peak_memory_bytes(device), cache
+
+
+def benchmark_static_decode(
+    model,
+    input_ids,
+    decode_len,
+    device,
+    warmup,
+    steps,
+    cache_factory,
+    chunk_size,
+):
+    for _ in range(warmup):
+        cache = cache_factory()
+        prefill_outputs = static_prefill_once(model, input_ids, cache, chunk_size)
+        token = prefill_outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        _ = static_decode_sequence(model, token, cache, decode_len)
+
+    gc.collect()
+    reset_peak_memory(device)
+
+    sequence_latencies = []
+    final_outputs = None
+    cache = None
+    for _ in range(steps):
+        cache = cache_factory()
+        prefill_outputs = static_prefill_once(model, input_ids, cache, chunk_size)
+        token = prefill_outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        latency_ms, final_outputs = time_call(
+            lambda: static_decode_sequence(model, token, cache, decode_len),
+            device,
+        )
+        sequence_latencies.append(latency_ms)
+
+    return sequence_latencies, final_outputs, peak_memory_bytes(device), cache
+
+
 @torch.no_grad()
 def decode_sequence(model, token, past, decode_len):
     outputs = None
     for _ in range(decode_len):
         outputs = decode_once(model, token, past)
         past = outputs.past_key_values
+        token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+    return outputs
+
+
+@torch.no_grad()
+def static_decode_sequence(model, token, cache, decode_len):
+    outputs = None
+    for _ in range(decode_len):
+        outputs = model(input_ids=token, past_key_values=cache, use_cache=True)
         token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
     return outputs
 
@@ -434,6 +618,8 @@ def build_result(
     prefill_peak_memory,
     decode_peak_memory,
     full_attention_heads,
+    prefill_cache_metrics=None,
+    decode_cache_metrics=None,
 ):
     prefill_stats = summarize(prefill_latencies)
     decode_stats = summarize(decode_latencies)
@@ -447,9 +633,10 @@ def build_result(
     full_layer_count = sum(layer_type == "full_attention" for layer_type in layer_types)
     sliding_layer_count = sum(layer_type == "sliding_attention" for layer_type in layer_types)
 
-    return {
+    result = {
         "variant": variant,
         "model": args.model,
+        "duo_cache_mode": args.duo_cache_mode if variant == "duo" else "",
         "batch_size": args.batch_size,
         "prompt_length": prompt_length,
         "decode_length": decode_length,
@@ -494,6 +681,57 @@ def build_result(
         "dtype": args.dtype,
         "torch_version": torch.__version__,
     }
+    if prefill_cache_metrics:
+        result.update(
+            {
+                "kv_cache_prefill_active_mb": prefill_cache_metrics[
+                    "kv_cache_active_bytes"
+                ]
+                / 1024
+                / 1024,
+                "kv_cache_prefill_dense_equivalent_mb": prefill_cache_metrics[
+                    "kv_cache_dense_equivalent_bytes"
+                ]
+                / 1024
+                / 1024,
+                "kv_cache_prefill_utilization_pct": prefill_cache_metrics[
+                    "kv_cache_utilization"
+                ]
+                * 100.0,
+                "kv_cache_prefill_allocated_vs_dense_ratio": prefill_cache_metrics[
+                    "kv_cache_allocated_vs_dense_ratio"
+                ],
+                "kv_cache_prefill_active_vs_dense_ratio": prefill_cache_metrics[
+                    "kv_cache_active_vs_dense_ratio"
+                ],
+            }
+        )
+    if decode_cache_metrics:
+        result.update(
+            {
+                "kv_cache_decode_active_mb": decode_cache_metrics[
+                    "kv_cache_active_bytes"
+                ]
+                / 1024
+                / 1024,
+                "kv_cache_decode_dense_equivalent_mb": decode_cache_metrics[
+                    "kv_cache_dense_equivalent_bytes"
+                ]
+                / 1024
+                / 1024,
+                "kv_cache_decode_utilization_pct": decode_cache_metrics[
+                    "kv_cache_utilization"
+                ]
+                * 100.0,
+                "kv_cache_decode_allocated_vs_dense_ratio": decode_cache_metrics[
+                    "kv_cache_allocated_vs_dense_ratio"
+                ],
+                "kv_cache_decode_active_vs_dense_ratio": decode_cache_metrics[
+                    "kv_cache_active_vs_dense_ratio"
+                ],
+            }
+        )
+    return result
 
 
 def attach_comparisons(records):
@@ -511,6 +749,12 @@ def attach_comparisons(records):
             "kv_cache_prefill_mb",
             "kv_cache_decode_mb",
             "kv_cache_decode_bytes_per_token",
+            "kv_cache_prefill_active_mb",
+            "kv_cache_decode_active_mb",
+            "kv_cache_prefill_active_vs_dense_ratio",
+            "kv_cache_decode_active_vs_dense_ratio",
+            "kv_cache_prefill_allocated_vs_dense_ratio",
+            "kv_cache_decode_allocated_vs_dense_ratio",
             "prefill_mean_ms",
             "decode_per_token_mean_ms",
             "prefill_peak_allocated_mb",
@@ -613,6 +857,18 @@ def write_plots(records, plot_dir):
             "kv_cache_decode_bytes_per_token",
             "KV cache bytes/token",
             plot_dir / "kv_cache_bytes_per_token.png",
+        ),
+        plot_metric(
+            records,
+            "kv_cache_decode_active_mb",
+            "Active KV cache after decode (MB)",
+            plot_dir / "kv_cache_decode_active_mb.png",
+        ),
+        plot_metric(
+            records,
+            "kv_cache_decode_utilization_pct",
+            "Static KV cache utilization (%)",
+            plot_dir / "kv_cache_utilization_pct.png",
         ),
         plot_metric(
             records,
@@ -740,24 +996,96 @@ def main():
                 args.seed,
             )
             print(f"\n[{variant}] prompt_length={prompt_length}")
-            prefill_latencies, prefill_outputs, prefill_peak_memory = benchmark_prefill(
-                model,
-                input_ids,
-                args.device,
-                args.warmup,
-                args.steps,
-            )
-
-            for decode_length in decode_lengths:
-                print(f"[{variant}] decode_length={decode_length}")
-                decode_latencies, decode_outputs, decode_peak_memory = benchmark_decode(
+            max_decode_length = max(decode_lengths) if decode_lengths else 0
+            cache_factory = None
+            prefill_cache_metrics = None
+            if is_static_duo(args, variant):
+                cache_max_size = prompt_length + max_decode_length + 1
+                cache_factory = lambda max_size=cache_max_size: make_static_cache(
+                    args,
+                    model,
+                    full_attention_heads,
+                    max_size,
+                )
+                (
+                    prefill_latencies,
+                    prefill_outputs,
+                    prefill_peak_memory,
+                    prefill_cache,
+                ) = benchmark_static_prefill(
                     model,
                     input_ids,
-                    decode_length,
+                    args.device,
+                    args.warmup,
+                    args.steps,
+                    cache_factory,
+                    args.prefilling_chunk_size,
+                )
+                prefill_cache_metrics = static_cache_metrics(
+                    prefill_cache,
+                    model,
+                    prompt_length,
+                )
+            else:
+                (
+                    prefill_latencies,
+                    prefill_outputs,
+                    prefill_peak_memory,
+                ) = benchmark_prefill(
+                    model,
+                    input_ids,
                     args.device,
                     args.warmup,
                     args.steps,
                 )
+
+            for decode_length in decode_lengths:
+                print(f"[{variant}] decode_length={decode_length}")
+                decode_cache_metrics = None
+                if is_static_duo(args, variant):
+                    decode_cache_factory = (
+                        lambda max_size=prompt_length
+                        + decode_length
+                        + 1: make_static_cache(
+                            args,
+                            model,
+                            full_attention_heads,
+                            max_size,
+                        )
+                    )
+                    (
+                        decode_latencies,
+                        decode_outputs,
+                        decode_peak_memory,
+                        decode_cache,
+                    ) = benchmark_static_decode(
+                        model,
+                        input_ids,
+                        decode_length,
+                        args.device,
+                        args.warmup,
+                        args.steps,
+                        decode_cache_factory,
+                        args.prefilling_chunk_size,
+                    )
+                    decode_cache_metrics = static_cache_metrics(
+                        decode_cache,
+                        model,
+                        prompt_length + decode_length,
+                    )
+                else:
+                    (
+                        decode_latencies,
+                        decode_outputs,
+                        decode_peak_memory,
+                    ) = benchmark_decode(
+                        model,
+                        input_ids,
+                        decode_length,
+                        args.device,
+                        args.warmup,
+                        args.steps,
+                    )
                 record = build_result(
                     args,
                     variant,
@@ -772,6 +1100,8 @@ def main():
                     prefill_peak_memory,
                     decode_peak_memory,
                     full_attention_heads,
+                    prefill_cache_metrics,
+                    decode_cache_metrics,
                 )
                 records.append(record)
                 print(
