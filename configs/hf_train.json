@@ -10,7 +10,7 @@
   "dataset_format": "code_retrieval",
   "smoke_dataset": false,
   "streaming_attn_implementation": "sdpa",
-  "num_steps": 10,
+  "num_steps": 200,
   "save_steps": 5,
   "batch_size": 1,
   "max_length": 4000,
