@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from duo_attn.patch import enable_duo_attention_eval
 from duo_attn.patch.laguna import enable_laguna_duo_attention_static_kv_cache_eval
+from duo_attn.patch.mixed_kv_cache import DuoAttentionStaticMixedKVCache
 from duo_attn.patch.static_kv_cache import DuoAttentionStaticKVCache
 
 
@@ -81,10 +82,36 @@ def parse_args():
     parser.add_argument(
         "--duo-cache-mode",
         default="tuple",
-        choices=["tuple", "static"],
+        choices=["tuple", "static", "mixed"],
         help=(
             "KV-cache implementation to use for the duo variant. static uses "
-            "DuoAttentionStaticKVCache and reports cache allocation/utilization."
+            "DuoAttentionStaticKVCache. mixed stores retrieval KV in FP8 and "
+            "streaming KV in packed INT4, then dequantizes for attention."
+        ),
+    )
+    parser.add_argument(
+        "--mixed-kv-streaming-group-size",
+        type=int,
+        default=128,
+        help="Group size for mixed-cache INT4 streaming KV quantization.",
+    )
+    parser.add_argument(
+        "--dense-kv-cache-dtype-bytes",
+        type=float,
+        default=0,
+        help=(
+            "Bytes per scalar for dense/base KV-cache accounting. Defaults to model "
+            "dtype when 0. Use 1 for Laguna production FP8 KV estimates."
+        ),
+    )
+    parser.add_argument(
+        "--base-kv-cache-accounting",
+        default="actual",
+        choices=["actual", "dense"],
+        help=(
+            "How to report base KV-cache bytes. actual measures Transformers output "
+            "cache tensors; dense uses the dense Laguna formula and "
+            "--dense-kv-cache-dtype-bytes."
         ),
     )
     parser.add_argument(
@@ -235,7 +262,13 @@ def cache_nbytes(cache):
     return visit(cache)
 
 
-def dense_kv_cache_nbytes(model, batch_size, tokens):
+def dense_kv_scalar_nbytes(model, args=None):
+    if args is not None and args.dense_kv_cache_dtype_bytes:
+        return float(args.dense_kv_cache_dtype_bytes)
+    return dtype_nbytes(model)
+
+
+def dense_kv_cache_nbytes(model, batch_size, tokens, args=None):
     config = model.config
     head_dim = getattr(
         config,
@@ -249,11 +282,14 @@ def dense_kv_cache_nbytes(model, batch_size, tokens):
         * config.num_key_value_heads
         * head_dim
         * tokens
-        * dtype_nbytes(model)
+        * dense_kv_scalar_nbytes(model, args)
     )
 
 
 def static_cache_active_nbytes(cache):
+    if hasattr(cache, "active_memory_usage"):
+        return int(cache.active_memory_usage)
+
     total = 0
     for layer_idx in range(cache.num_layers):
         full_tokens = cache.kv_seq_len_list[layer_idx]
@@ -279,11 +315,11 @@ def static_cache_active_nbytes(cache):
     return total
 
 
-def static_cache_metrics(cache, model, tokens):
+def static_cache_metrics(cache, model, tokens, args):
     allocated = cache.memory_usage
     active = static_cache_active_nbytes(cache)
-    dense = dense_kv_cache_nbytes(model, cache.batch_size, tokens)
-    return {
+    dense = dense_kv_cache_nbytes(model, cache.batch_size, tokens, args)
+    metrics = {
         "kv_cache_allocated_bytes": allocated,
         "kv_cache_active_bytes": active,
         "kv_cache_dense_equivalent_bytes": dense,
@@ -291,6 +327,9 @@ def static_cache_metrics(cache, model, tokens):
         "kv_cache_allocated_vs_dense_ratio": allocated / dense if dense else 0.0,
         "kv_cache_active_vs_dense_ratio": active / dense if dense else 0.0,
     }
+    if hasattr(cache, "cache_precision_summary"):
+        metrics.update(cache.cache_precision_summary)
+    return metrics
 
 
 def load_full_attention_heads(path):
@@ -419,10 +458,20 @@ def load_model(args, variant, full_attention_heads):
 
 
 def is_static_duo(args, variant):
-    return variant == "duo" and args.duo_cache_mode == "static"
+    return variant == "duo" and args.duo_cache_mode in {"static", "mixed"}
 
 
 def make_static_cache(args, model, full_attention_heads, max_size):
+    if args.duo_cache_mode == "mixed":
+        return DuoAttentionStaticMixedKVCache(
+            model,
+            full_attention_heads,
+            args.batch_size,
+            max_size,
+            args.sink_size,
+            args.recent_size,
+            streaming_group_size=args.mixed_kv_streaming_group_size,
+        )
     return DuoAttentionStaticKVCache(
         model,
         full_attention_heads,
@@ -623,11 +672,25 @@ def build_result(
 ):
     prefill_stats = summarize(prefill_latencies)
     decode_stats = summarize(decode_latencies)
-    kv_bytes_after_prefill = cache_nbytes(prefill_outputs.past_key_values)
-    kv_bytes_after_decode = cache_nbytes(decode_outputs.past_key_values)
     tokens_prefilled = args.batch_size * prompt_length
     tokens_decoded = args.batch_size * decode_length
     total_tokens_in_cache = tokens_prefilled + tokens_decoded
+    if variant == "base" and args.base_kv_cache_accounting == "dense":
+        kv_bytes_after_prefill = dense_kv_cache_nbytes(
+            model,
+            args.batch_size,
+            prompt_length,
+            args,
+        )
+        kv_bytes_after_decode = dense_kv_cache_nbytes(
+            model,
+            args.batch_size,
+            prompt_length + decode_length,
+            args,
+        )
+    else:
+        kv_bytes_after_prefill = cache_nbytes(prefill_outputs.past_key_values)
+        kv_bytes_after_decode = cache_nbytes(decode_outputs.past_key_values)
     full_ratio = float(np.mean(full_attention_heads))
     layer_types = list(getattr(config, "layer_types", []) or [])
     full_layer_count = sum(layer_type == "full_attention" for layer_type in layer_types)
@@ -637,6 +700,9 @@ def build_result(
         "variant": variant,
         "model": args.model,
         "duo_cache_mode": args.duo_cache_mode if variant == "duo" else "",
+        "dense_kv_cache_dtype_bytes": (
+            dense_kv_scalar_nbytes(model, args) if variant in {"base", "duo"} else ""
+        ),
         "batch_size": args.batch_size,
         "prompt_length": prompt_length,
         "decode_length": decode_length,
@@ -704,6 +770,18 @@ def build_result(
                 "kv_cache_prefill_active_vs_dense_ratio": prefill_cache_metrics[
                     "kv_cache_active_vs_dense_ratio"
                 ],
+                "kv_cache_retrieval_storage": prefill_cache_metrics.get(
+                    "retrieval_kv_storage",
+                    "",
+                ),
+                "kv_cache_streaming_storage": prefill_cache_metrics.get(
+                    "streaming_kv_storage",
+                    "",
+                ),
+                "kv_cache_streaming_group_size": prefill_cache_metrics.get(
+                    "streaming_group_size",
+                    "",
+                ),
             }
         )
     if decode_cache_metrics:
@@ -1025,6 +1103,7 @@ def main():
                     prefill_cache,
                     model,
                     prompt_length,
+                    args,
                 )
             else:
                 (
@@ -1072,6 +1151,7 @@ def main():
                         decode_cache,
                         model,
                         prompt_length + decode_length,
+                        args,
                     )
                 else:
                     (
