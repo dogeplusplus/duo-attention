@@ -14,14 +14,13 @@ DOCKER_BUILD_SECRETS ?= $(if $(HF_TOKEN),--secret id=hf_token$(comma)env=HF_TOKE
 BENCH_CONFIG_FILE ?= configs/laguna_benchmark.json
 MIXED_KV_BENCH_CONFIG_FILE ?= configs/laguna_mixed_kv_benchmark.json
 BENCH_JOB_CONFIG_FILE ?= configs/hf_laguna_benchmark_job.json
-MODEL_CARD_EXAMPLE_JOB_CONFIG_FILE ?= configs/hf_model_card_example_job.json
 PUBLISH_REPO_ID ?= dogeplusplus/duo-laguna-adapter-smoke
 PUBLISH_WANDB_PROJECT ?= dogeplusplus/DuoAttention
 PUBLISH_ARTIFACT_DIR ?=
 PUBLISH_PRIVATE ?= --private
 PUBLISH_EXTRA ?=
 
-.PHONY: help train update-docker-image docker-build docker-push smoke-laguna-mixed-kv benchmark-laguna-duo benchmark-laguna-mixed-kv submit-laguna-benchmark submit-laguna-mixed-kv-benchmark submit-model-card-example publish-duo-adapter
+.PHONY: help train update-docker-image docker-build docker-push smoke-laguna-mixed-kv benchmark-laguna-duo benchmark-laguna-mixed-kv submit-laguna-benchmark submit-laguna-mixed-kv-benchmark publish-duo-adapter
 
 help:
 	@printf "Targets:\n"
@@ -32,7 +31,6 @@ help:
 	@printf "  make benchmark-laguna-mixed-kv Benchmark Laguna FP8 dense KV vs Duo FP8/INT4 KV locally\n"
 	@printf "  make submit-laguna-benchmark Submit Laguna benchmark to HF Jobs\n"
 	@printf "  make submit-laguna-mixed-kv-benchmark Submit the mixed KV benchmark to HF Jobs\n"
-	@printf "  make submit-model-card-example Submit the model-card KV-cache example to HF Jobs\n"
 	@printf "  make publish-duo-adapter   Publish latest W&B Duo adapter to the Hub\n"
 	@printf "\nUseful overrides:\n"
 	@printf "  CONFIG_FILE=... GIT_REF=... DOCKER_IMAGE=... BENCH_CONFIG_FILE=... MIXED_KV_BENCH_CONFIG_FILE=... BENCH_JOB_CONFIG_FILE=... PUBLISH_REPO_ID=...\n"
@@ -77,10 +75,6 @@ submit-laguna-mixed-kv-benchmark:
 		--job-config "$(BENCH_JOB_CONFIG_FILE)" \
 		--benchmark-config "$(MIXED_KV_BENCH_CONFIG_FILE)" \
 		--git-ref "$(GIT_REF)"
-
-submit-model-card-example:
-	uv run python scripts/launch_hf_model_card_example_job.py \
-		--job-config "$(MODEL_CARD_EXAMPLE_JOB_CONFIG_FILE)"
 
 publish-duo-adapter:
 	uv run python scripts/publish_wandb_duo_adapter.py \

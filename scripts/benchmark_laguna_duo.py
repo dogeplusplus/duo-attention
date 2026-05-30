@@ -445,7 +445,7 @@ def load_model(args, variant, full_attention_heads):
     model.eval()
     model.to(args.device)
 
-    if variant == "duo" and args.duo_cache_mode == "static":
+    if variant == "duo" and args.duo_cache_mode in {"static", "mixed"}:
         enable_laguna_duo_attention_static_kv_cache_eval(model, full_attention_heads)
     elif variant == "duo":
         enable_duo_attention_eval(
