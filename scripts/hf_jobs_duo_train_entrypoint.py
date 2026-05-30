@@ -5,6 +5,7 @@ import os
 import json
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import torch
@@ -22,6 +23,44 @@ def env_arg(args: list[str], env_name: str, cli_name: str, default=None):
     value = os.environ.get(env_name, default)
     if value is not None and value != "":
         args.extend([cli_name, str(value)])
+
+
+def ensure_blocksparse_attention():
+    if os.environ.get("STREAMING_ATTN_IMPLEMENTATION", "sdpa") != "blocksparse":
+        return
+
+    try:
+        from block_sparse_attn import block_streaming_attn_func
+    except ImportError:
+        block_streaming_attn_func = None
+
+    if block_streaming_attn_func is not None:
+        return
+
+    source_dir = Path("/tmp/Block-Sparse-Attention")
+    if not source_dir.exists():
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "https://github.com/mit-han-lab/Block-Sparse-Attention",
+                str(source_dir),
+            ],
+            check=True,
+        )
+
+    subprocess.run(
+        [sys.executable, "setup.py", "install"],
+        cwd=str(source_dir),
+        check=True,
+    )
+
+    from block_sparse_attn import block_streaming_attn_func
+
+    if block_streaming_attn_func is None:
+        raise RuntimeError("Block-Sparse-Attention installed but block_streaming_attn_func is unavailable.")
 
 
 def resolve_nproc_per_node() -> str:
@@ -166,6 +205,7 @@ def main():
     if "MODEL_NAME" not in os.environ:
         raise ValueError("MODEL_NAME must point to a local path or Hub model id.")
 
+    ensure_blocksparse_attention()
     command = build_train_command()
     print("Running:", shlex.join(command), flush=True)
     subprocess.run(command, check=True)
