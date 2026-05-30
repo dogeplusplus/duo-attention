@@ -46,6 +46,10 @@ tags:
 This repository contains adapter-only DuoAttention head weights for
 `{base_model}`. It does not include the Laguna base weights or tokenizer.
 
+Team: KV Tenants
+
+Authors: Albert Chung and Cameron Wheeler
+
 DuoAttention reduces long-context KV-cache growth by learning which KV heads
 need full history and letting the remaining heads keep only a sink window plus
 recent tokens. This Laguna adapter loads the base model, applies the learned
@@ -269,6 +273,10 @@ tags:
 
 This repository packages a Laguna causal language model with learned
 DuoAttention head weights and custom loading code.
+
+Team: KV Tenants
+
+Authors: Albert Chung and Cameron Wheeler
 
 DuoAttention reduces long-context KV-cache growth by keeping full history only
 for learned retrieval/global heads while streaming the remaining heads with a
