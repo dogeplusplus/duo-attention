@@ -173,6 +173,26 @@ def build_train_command() -> list[str]:
     return ["torchrun", "--nnodes", "1", "--nproc_per_node", nproc_per_node, *train_args]
 
 
+def print_wandb_diagnostics():
+    try:
+        import wandb
+
+        wandb_version = wandb.__version__
+    except Exception as exc:
+        wandb_version = f"unavailable ({exc})"
+
+    print(
+        "W&B diagnostics: "
+        f"version={wandb_version}, "
+        f"api_key_set={'yes' if os.environ.get('WANDB_API_KEY') else 'no'}, "
+        f"entity={os.environ.get('WANDB_ENTITY') or '<default>'}, "
+        f"project={os.environ.get('WANDB_PROJECT') or 'DuoAttention'}, "
+        f"mode={os.environ.get('WANDB_MODE') or 'online'}, "
+        f"log_attention_every={os.environ.get('WANDB_LOG_ATTENTION_EVERY') or '5'}",
+        flush=True,
+    )
+
+
 def upload_outputs():
     output_repo_id = os.environ.get("OUTPUT_REPO_ID")
     if not output_repo_id:
@@ -206,6 +226,7 @@ def main():
         raise ValueError("MODEL_NAME must point to a local path or Hub model id.")
 
     # ensure_blocksparse_attention()
+    print_wandb_diagnostics()
     command = build_train_command()
     print("Running:", shlex.join(command), flush=True)
     subprocess.run(command, check=True)

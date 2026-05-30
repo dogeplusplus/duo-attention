@@ -46,6 +46,22 @@ def parse_args():
     parser.add_argument("--enable_pp", action="store_true")
     parser.add_argument("--enable_tp", action="store_true")
     parser.add_argument("--disable_wandb", action="store_true")
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default=os.environ.get("WANDB_PROJECT", "DuoAttention"),
+    )
+    parser.add_argument(
+        "--wandb_entity",
+        type=str,
+        default=os.environ.get("WANDB_ENTITY"),
+    )
+    parser.add_argument(
+        "--wandb_log_attention_every",
+        type=int,
+        default=int(os.environ.get("WANDB_LOG_ATTENTION_EVERY", "5")),
+        help="Log attention-head media every N steps. Set 0 to disable media logging.",
+    )
     parser.add_argument("--min_needle_depth_ratio", type=float, default=0)
     parser.add_argument("--max_needle_depth_ratio", type=float, default=1.0)
     parser.add_argument("--save_steps", type=int, default=50)

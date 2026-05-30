@@ -169,6 +169,11 @@ def log_wandb_artifacts(package_dir):
     wandb.log_artifact(artifact)
 
 
+def should_log_attention_media(args, global_step):
+    interval = getattr(args, "wandb_log_attention_every", 0)
+    return interval > 0 and (global_step == 1 or global_step % interval == 0)
+
+
 def setup():
     # initialize the process group
     dist.init_process_group("nccl")
@@ -298,22 +303,20 @@ def train(
                 )
 
                 if not args.disable_wandb:
-                    fig = visualize_pruned_attention_heads(full_attention_heads_list)
-
                     sample_len = batch["input_ids"].shape[1]
-                    wandb.log(
-                        {
-                            "distill_loss": distill_loss.item(),
-                            "reg_loss": reg_loss.item(),
-                            "attn_heads": fig,
-                            "step": global_step,
-                            "sample_len": sample_len,
-                            "lr": optimizer.param_groups[0]["lr"],
-                        },
-                        step=global_step,
-                    )
+                    metrics = {
+                        "distill_loss": distill_loss.item(),
+                        "reg_loss": reg_loss.item(),
+                        "sample_len": sample_len,
+                        "lr": optimizer.param_groups[0]["lr"],
+                    }
 
-                    plt.close(fig)
+                    if should_log_attention_media(args, global_step):
+                        fig = visualize_pruned_attention_heads(full_attention_heads_list)
+                        metrics["attn_heads"] = wandb.Image(fig)
+                        plt.close(fig)
+
+                    wandb.log(metrics, step=global_step)
 
                 pbar.set_description(
                     f"Len={seq_len}/{global_num_labels}|Dloss={distill_loss.item():.3f}|Rloss={reg_loss.item():.3f}|LR={optimizer.param_groups[0]['lr']:.2e}"
@@ -495,9 +498,19 @@ def main(args):
     if rank == 0:
         experiment_config = vars(args)
         if not args.disable_wandb:
-            wandb.init(project="DuoAttention", config=experiment_config)
+            run = wandb.init(
+                project=args.wandb_project,
+                entity=args.wandb_entity,
+                config=experiment_config,
+            )
             if args.exp_name is not None:
-                wandb.run.name = args.exp_name
+                run.name = args.exp_name
+            print(
+                "W&B initialized: "
+                f"entity={run.entity}, project={run.project}, run_id={run.id}, "
+                f"log_attention_every={args.wandb_log_attention_every}",
+                flush=True,
+            )
 
         if args.output_dir is not None:
             with open(os.path.join(args.output_dir, "config.json"), "w") as f:
@@ -563,6 +576,7 @@ def main(args):
             )
             if not args.disable_wandb:
                 log_wandb_artifacts(package_dir)
+                wandb.finish()
 
     dist.barrier()
     cleanup()

@@ -50,6 +50,13 @@ def main():
     parser.add_argument("--output-repo-id", default=None, help="Optional model repo for training artifacts.")
     parser.add_argument("--hf-token-env", default="HF_TOKEN", help="Local env var containing a Hub token.")
     parser.add_argument("--wandb-token-env", default="WANDB_API_KEY", help="Local env var containing a W&B key.")
+    parser.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT", "DuoAttention"))
+    parser.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY"))
+    parser.add_argument(
+        "--wandb-log-attention-every",
+        default=os.environ.get("WANDB_LOG_ATTENTION_EVERY", "5"),
+        help="Log attention-head media every N steps. Set 0 to disable media logging.",
+    )
     parser.add_argument("--env", action="append", default=[], help="Extra job env as KEY=VALUE.")
     parser.add_argument("--secret", action="append", default=[], help="Extra job secret as KEY=VALUE.")
     args = parser.parse_args()
@@ -58,7 +65,11 @@ def main():
         "MODEL_NAME": args.model_name,
         "STREAMING_ATTN_IMPLEMENTATION": "sdpa",
         "DISABLE_WANDB": "true",
+        "WANDB_PROJECT": args.wandb_project,
+        "WANDB_LOG_ATTENTION_EVERY": args.wandb_log_attention_every,
     }
+    if args.wandb_entity:
+        env["WANDB_ENTITY"] = args.wandb_entity
     if args.dataset_name:
         env["DATASET_NAME"] = args.dataset_name
     if args.dataset_config_name:
